@@ -86,6 +86,8 @@ are checked to name every leaf exactly once.
 | NEWMV's second clamp | 18.1: the final vector "is clamped again" | the stored vector is clamped (prediction is the same either way, since the clamp only moves a vector further into the extended border) | not exercised |
 | Golden / altref copies in one frame | 9.7: "last frame" / "golden" / "altref" are copied, the order is not stated | copies read the buffers as they were before the frame | not exercised |
 | Coefficient context | 13.3: neighbours with "at least one non-zero coefficient" | as stated (a block of explicit zeros counts as empty) | not exercised |
+| Sign bias | 9.7, 16.3: a neighbour's vector is negated when its reference's sign bias differs from the macroblock's | as stated | not exercised (no vector sets a sign bias); unit-tested against 16.3's census |
+| Four and eight token partitions | 9.5 | as stated | not exercised by the vectors (they use one and two); covered by the encoder's round trips |
 | Version 3 luma | 9.1: version 3 has no reconstruction filter; 18.1 truncates chroma vectors to whole pixels | chroma whole-pixel (confirmed); luma uses the bilinear filter | luma not exercised |
 
 ## Test data

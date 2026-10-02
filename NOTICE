@@ -1,0 +1,42 @@
+rivet-vp8 — a VP8 decoder and encoder
+Copyright 2026 Ely Erin Fox
+
+This product is licensed under the Open Encoding Attribution License,
+Version 1.0 (see LICENSE.md). It is source-available, not open source: the
+attribution duty in §5 applies to commercial use; §4 requires this NOTICE to
+be carried forward with any distribution.
+
+------------------------------------------------------------------------------
+Provenance
+------------------------------------------------------------------------------
+
+The decoder and encoder are original implementations written from RFC 6386
+(VP8 Data Format and Decoding Guide), its prose and tables. They are not
+translations of, and do not derive from, any other VP8 implementation's
+source: not libvpx, not FFmpeg's libavcodec, and not the reference decoder
+whose source RFC 6386 attaches (its section 20), which was not read. The
+probability, quantiser and filter tables are reproduced from RFC 6386;
+docs/PROVENANCE.md records the sections they come from and how each place
+the RFC leaves open was settled.
+
+The decoder is verified against the VP8 comprehensive test vectors
+(vp80-00-comprehensive-001 to -018) and the MD5s of their decoded frames,
+from the WebM project's public test data; tests/data/README.md gives their
+source. They are bitstream data only; no implementation was run to make or
+check anything in this crate.
+
+------------------------------------------------------------------------------
+Patents
+------------------------------------------------------------------------------
+
+Implementations of VP8 may be covered by patents. This licence grants no
+rights under any patent, and the authors make no claim about whether a
+patent licence is needed for any use.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+thiserror (https://crates.io/crates/thiserror) — MIT OR Apache-2.0
+proptest (https://crates.io/crates/proptest), development dependency only — MIT OR Apache-2.0
+md5 (https://crates.io/crates/md5), development dependency only — MIT OR Apache-2.0
