@@ -33,11 +33,11 @@ jobs:
         run: cargo test --test fuzz
 
   msrv:
-    name: MSRV (1.89)
+    name: MSRV (1.99)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.99
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
 
