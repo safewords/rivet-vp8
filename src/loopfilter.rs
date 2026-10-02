@@ -54,7 +54,12 @@ impl Params {
             (false, 15..) => 1,
             _ => 0,
         };
-        Params { mb_limit: (level + 2) * 2 + interior, sub_limit: level * 2 + interior, interior, hev }
+        Params {
+            mb_limit: (level + 2) * 2 + interior,
+            sub_limit: level * 2 + interior,
+            interior,
+            hev,
+        }
     }
 }
 
@@ -88,7 +93,8 @@ fn edge_ok(buf: &[u8], at: usize, step: usize, limit: i32) -> bool {
 #[inline]
 fn filter_yes(buf: &[u8], at: usize, step: usize, e: i32, i: i32) -> bool {
     let px = |k: isize| buf[(at as isize + k * step as isize) as usize] as i32;
-    let (p3, p2, p1, p0, q0, q1, q2, q3) = (px(-4), px(-3), px(-2), px(-1), px(0), px(1), px(2), px(3));
+    let (p3, p2, p1, p0, q0, q1, q2, q3) =
+        (px(-4), px(-3), px(-2), px(-1), px(0), px(1), px(2), px(3));
     (p0 - q0).abs() * 2 + (p1 - q1).abs() / 2 <= e
         && (p3 - p2).abs() <= i
         && (p2 - p1).abs() <= i
@@ -108,7 +114,14 @@ fn hev(buf: &[u8], at: usize, step: usize, t: i32) -> bool {
 }
 
 /// The simple filter across one edge of `n` segments (section 15.2).
-pub(crate) fn simple_edge(buf: &mut [u8], pos: usize, step: usize, along: usize, n: usize, limit: i32) {
+pub(crate) fn simple_edge(
+    buf: &mut [u8],
+    pos: usize,
+    step: usize,
+    along: usize,
+    n: usize,
+    limit: i32,
+) {
     for k in 0..n {
         let at = pos + k * along;
         if edge_ok(buf, at, step, limit) {
@@ -118,7 +131,15 @@ pub(crate) fn simple_edge(buf: &mut [u8], pos: usize, step: usize, along: usize,
 }
 
 /// The normal filter's subblock-edge variant (section 15.3).
-pub(crate) fn subblock_edge(buf: &mut [u8], pos: usize, step: usize, along: usize, n: usize, limit: i32, p: &Params) {
+pub(crate) fn subblock_edge(
+    buf: &mut [u8],
+    pos: usize,
+    step: usize,
+    along: usize,
+    n: usize,
+    limit: i32,
+    p: &Params,
+) {
     for k in 0..n {
         let at = pos + k * along;
         if filter_yes(buf, at, step, limit, p.interior) {
@@ -135,7 +156,15 @@ pub(crate) fn subblock_edge(buf: &mut [u8], pos: usize, step: usize, along: usiz
 }
 
 /// The normal filter's macroblock-edge variant (section 15.3).
-pub(crate) fn mb_edge(buf: &mut [u8], pos: usize, step: usize, along: usize, n: usize, limit: i32, p: &Params) {
+pub(crate) fn mb_edge(
+    buf: &mut [u8],
+    pos: usize,
+    step: usize,
+    along: usize,
+    n: usize,
+    limit: i32,
+    p: &Params,
+) {
     for k in 0..n {
         let at = pos + k * along;
         if !filter_yes(buf, at, step, limit, p.interior) {
@@ -171,7 +200,10 @@ mod tests {
     #[test]
     fn params_follow_section_15_4() {
         let p = Params::new(32, 0, true);
-        assert_eq!((p.interior, p.mb_limit, p.sub_limit, p.hev), (32, 100, 96, 1));
+        assert_eq!(
+            (p.interior, p.mb_limit, p.sub_limit, p.hev),
+            (32, 100, 96, 1)
+        );
         let p = Params::new(32, 5, false);
         assert_eq!(p.interior, 4); // 32 >> 2 = 8, capped at 9 - 5
         assert_eq!(p.hev, 2);

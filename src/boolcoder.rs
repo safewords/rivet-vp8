@@ -29,7 +29,14 @@ pub(crate) struct BoolDecoder<'a> {
 
 impl<'a> BoolDecoder<'a> {
     pub(crate) fn new(data: &'a [u8]) -> Self {
-        let mut d = BoolDecoder { data, pos: 0, value: 0, count: -8, range: 255, overrun: 0 };
+        let mut d = BoolDecoder {
+            data,
+            pos: 0,
+            value: 0,
+            count: -8,
+            range: 255,
+            overrun: 0,
+        };
         d.fill();
         d
     }
@@ -143,7 +150,12 @@ pub(crate) struct BoolEncoder {
 
 impl BoolEncoder {
     pub(crate) fn new() -> Self {
-        BoolEncoder { out: Vec::new(), range: 255, bottom: 0, bit_count: 24 }
+        BoolEncoder {
+            out: Vec::new(),
+            range: 255,
+            bottom: 0,
+            bit_count: 24,
+        }
     }
 
     /// Adds one to the bytes already written (a carry out of `bottom`).
@@ -226,8 +238,19 @@ impl BoolEncoder {
 }
 
 /// The (node, bit) steps from node `start` to leaf `value`.
-pub(crate) fn tree_path(tree: &Tree, start: usize, value: u8, path: &mut [(usize, bool); 16]) -> Option<usize> {
-    fn walk(tree: &Tree, node: usize, value: u8, depth: usize, path: &mut [(usize, bool); 16]) -> Option<usize> {
+pub(crate) fn tree_path(
+    tree: &Tree,
+    start: usize,
+    value: u8,
+    path: &mut [(usize, bool); 16],
+) -> Option<usize> {
+    fn walk(
+        tree: &Tree,
+        node: usize,
+        value: u8,
+        depth: usize,
+        path: &mut [(usize, bool); 16],
+    ) -> Option<usize> {
         for bit in 0..2 {
             path[depth] = (node, bit == 1);
             let next = tree[node + bit];
@@ -264,7 +287,10 @@ static COST_TABLE: std::sync::LazyLock<[u16; 257]> = std::sync::LazyLock::new(||
 pub(crate) fn tree_cost(tree: &Tree, probs: &[u8], start: usize, value: u8) -> u32 {
     let mut path = [(0usize, false); 16];
     let n = tree_path(tree, start, value, &mut path).expect("value is a leaf of the tree");
-    path[..n].iter().map(|&(node, bit)| cost(probs[node >> 1], bit)).sum()
+    path[..n]
+        .iter()
+        .map(|&(node, bit)| cost(probs[node >> 1], bit))
+        .sum()
 }
 
 #[cfg(test)]
@@ -289,7 +315,12 @@ mod tests {
             b as u32
         }
         fn new(data: &'a [u8]) -> Self {
-            let mut d = BitDecoder { data, bitpos: 0, value: 0, range: 255 };
+            let mut d = BitDecoder {
+                data,
+                bitpos: 0,
+                value: 0,
+                range: 255,
+            };
             for _ in 0..16 {
                 d.value = (d.value << 1) | d.bit();
             }
@@ -315,7 +346,9 @@ mod tests {
     }
 
     fn lcg(seed: &mut u64) -> u32 {
-        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        *seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (*seed >> 33) as u32
     }
 
@@ -375,8 +408,8 @@ mod tests {
         let mut e = BoolEncoder::new();
         let mut bits = Vec::new();
         let mut seed = 99;
-        for i in 0..20000 {
-            let b = i % 97 != 0 && lcg(&mut seed) % 50 != 0;
+        for i in 0..20000u32 {
+            let b = !i.is_multiple_of(97) && !lcg(&mut seed).is_multiple_of(50);
             bits.push(b);
             e.write(1, b);
         }

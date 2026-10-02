@@ -11,7 +11,10 @@ fn check(name: &str) -> (usize, usize, Option<String>) {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
     let ivf = std::fs::read(dir.join(format!("{name}.ivf"))).unwrap();
     let md5s = std::fs::read_to_string(dir.join(format!("{name}.ivf.md5"))).unwrap();
-    let expected: Vec<&str> = md5s.lines().filter_map(|l| l.split_whitespace().next()).collect();
+    let expected: Vec<&str> = md5s
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
 
     let mut reader = vp8::ivf::IvfReader::new(&ivf[..]).unwrap();
     let mut dec = vp8::Decoder::new();
@@ -56,11 +59,21 @@ fn comprehensive_vectors() {
         let (ok, n, bad) = check(&name);
         total.0 += ok;
         total.1 += n;
-        println!("{name}: {ok}/{n} frames{}", bad.as_ref().map(|b| format!(", first mismatch at {b}")).unwrap_or_default());
+        println!(
+            "{name}: {ok}/{n} frames{}",
+            bad.as_ref()
+                .map(|b| format!(", first mismatch at {b}"))
+                .unwrap_or_default()
+        );
         if ok != n || bad.is_some() {
             failures.push(name);
         }
     }
-    println!("total: {}/{} frames; {} of 18 vectors bit-exact", total.0, total.1, 18 - failures.len());
+    println!(
+        "total: {}/{} frames; {} of 18 vectors bit-exact",
+        total.0,
+        total.1,
+        18 - failures.len()
+    );
     assert!(failures.is_empty(), "vectors not bit-exact: {failures:?}");
 }

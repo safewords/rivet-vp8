@@ -19,7 +19,14 @@ pub(crate) struct Edge<'a> {
 
 /// Predicts an `n`x`n` block (16 for luma, 8 for chroma) with one of the
 /// whole-block modes DC_PRED, V_PRED, H_PRED, TM_PRED (sections 12.2-12.3).
-pub(crate) fn predict_block(dst: &mut [u8], off: usize, stride: usize, n: usize, mode: u8, e: &Edge) {
+pub(crate) fn predict_block(
+    dst: &mut [u8],
+    off: usize,
+    stride: usize,
+    n: usize,
+    mode: u8,
+    e: &Edge,
+) {
     match mode {
         DC_PRED => {
             let shift = n.trailing_zeros();
@@ -75,7 +82,9 @@ pub(crate) fn predict_subblock(dst: &mut [u8], off: usize, stride: usize, mode: 
     let p = e.top_left;
     // The edge as one run, from the bottom of the left column up through
     // the corner and along the row above: L3 L2 L1 L0 P A0 .. A7.
-    let edge: [u8; 13] = [l[3], l[2], l[1], l[0], p, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]];
+    let edge: [u8; 13] = [
+        l[3], l[2], l[1], l[0], p, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7],
+    ];
     let s3 = |i: usize| avg3(edge[i - 1], edge[i], edge[i + 1]);
     let s2 = |i: usize| avg2(edge[i], edge[i + 1]);
     let mut b = [[0u8; 4]; 4];
@@ -113,7 +122,11 @@ pub(crate) fn predict_subblock(dst: &mut [u8], off: usize, stride: usize, mode: 
             for (r, row) in b.iter_mut().enumerate() {
                 for (c, v) in row.iter_mut().enumerate() {
                     let k = r + c;
-                    *v = if k < 6 { s3(6 + k) } else { avg3(a[6], a[7], a[7]) };
+                    *v = if k < 6 {
+                        s3(6 + k)
+                    } else {
+                        avg3(a[6], a[7], a[7])
+                    };
                 }
             }
         }
@@ -243,7 +256,8 @@ pub(crate) fn predict_inter(
     let (ww, wh) = (w + 5, h + 5);
     let x0 = ix - 2;
     let y0 = iy - 2;
-    let inside = x0 >= 0 && y0 >= 0 && (x0 as usize + ww) <= src.width && (y0 as usize + wh) <= src.height;
+    let inside =
+        x0 >= 0 && y0 >= 0 && (x0 as usize + ww) <= src.width && (y0 as usize + wh) <= src.height;
     if inside {
         for r in 0..wh {
             let s = (y0 as usize + r) * src.width + x0 as usize;
@@ -262,7 +276,8 @@ pub(crate) fn predict_inter(
     }
     if fx == 0 && fy == 0 {
         for r in 0..h {
-            dst[off + r * stride..off + r * stride + w].copy_from_slice(&win[(r + 2) * MAXW + 2..(r + 2) * MAXW + 2 + w]);
+            dst[off + r * stride..off + r * stride + w]
+                .copy_from_slice(&win[(r + 2) * MAXW + 2..(r + 2) * MAXW + 2 + w]);
         }
         return;
     }
@@ -292,7 +307,13 @@ mod tests {
     use super::*;
 
     fn edge<'a>(above: &'a [u8], left: &'a [u8], p: u8) -> Edge<'a> {
-        Edge { above, left, top_left: p, have_above: true, have_left: true }
+        Edge {
+            above,
+            left,
+            top_left: p,
+            have_above: true,
+            have_left: true,
+        }
     }
 
     #[test]
@@ -305,12 +326,21 @@ mod tests {
         predict_block(&mut buf, 0, 16, 16, H_PRED, &edge(&above, &left, 50));
         assert!(buf[5 * 16..6 * 16].iter().all(|&v| v == left[5]));
         predict_block(&mut buf, 0, 16, 16, TM_PRED, &edge(&above, &left, 50));
-        assert_eq!(buf[3 * 16 + 4], (left[3] as i32 + above[4] as i32 - 50).clamp(0, 255) as u8);
+        assert_eq!(
+            buf[3 * 16 + 4],
+            (left[3] as i32 + above[4] as i32 - 50).clamp(0, 255) as u8
+        );
         predict_block(&mut buf, 0, 16, 16, DC_PRED, &edge(&above, &left, 50));
         let s: u32 = above.iter().chain(&left).map(|&v| v as u32).sum();
         assert!(buf.iter().all(|&v| v as u32 == (s + 16) >> 5));
         // Top-left macroblock: no neighbours, 128.
-        let e = Edge { above: &above, left: &left, top_left: 0, have_above: false, have_left: false };
+        let e = Edge {
+            above: &above,
+            left: &left,
+            top_left: 0,
+            have_above: false,
+            have_left: false,
+        };
         predict_block(&mut buf, 0, 16, 8, DC_PRED, &e);
         assert_eq!(buf[7 * 16 + 7], 128);
     }
@@ -363,14 +393,33 @@ mod tests {
     #[test]
     fn whole_pel_inter_is_a_copy_and_edges_extend() {
         let data: Vec<u8> = (0..32 * 32).map(|i| (i % 251) as u8).collect();
-        let src = RefPlane { data: &data, width: 32, height: 32 };
+        let src = RefPlane {
+            data: &data,
+            width: 32,
+            height: 32,
+        };
         let mut out = [0u8; 16];
         predict_inter(src, &mut out, 0, 4, 8, 8, 4, 4, 16, -8, &SIXTAP_FILTERS);
         for r in 0..4 {
-            assert_eq!(&out[r * 4..r * 4 + 4], &data[(7 + r) * 32 + 10..(7 + r) * 32 + 14]);
+            assert_eq!(
+                &out[r * 4..r * 4 + 4],
+                &data[(7 + r) * 32 + 10..(7 + r) * 32 + 14]
+            );
         }
         // Far outside: every sample is the corner.
-        predict_inter(src, &mut out, 0, 4, 0, 0, 4, 4, -8000, -8000, &SIXTAP_FILTERS);
+        predict_inter(
+            src,
+            &mut out,
+            0,
+            4,
+            0,
+            0,
+            4,
+            4,
+            -8000,
+            -8000,
+            &SIXTAP_FILTERS,
+        );
         assert!(out.iter().all(|&v| v == data[0]));
     }
 
@@ -379,7 +428,11 @@ mod tests {
         // A horizontal ramp is reproduced by every filter at half-pel
         // (symmetric taps): the value midway between two samples.
         let data: Vec<u8> = (0..32 * 32).map(|i| (4 * (i % 32)) as u8).collect();
-        let src = RefPlane { data: &data, width: 32, height: 32 };
+        let src = RefPlane {
+            data: &data,
+            width: 32,
+            height: 32,
+        };
         let mut out = [0u8; 16];
         for f in [&SIXTAP_FILTERS, &BILINEAR_FILTERS] {
             predict_inter(src, &mut out, 0, 4, 8, 8, 4, 4, 4, 0, f);

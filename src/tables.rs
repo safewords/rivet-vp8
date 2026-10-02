@@ -5,7 +5,9 @@
 //! script transcribes. Mode numbering follows the RFC's enumerations, as
 //! section 8.2 recommends.
 
-pub(crate) use crate::tables_rfc::{AC_QLOOKUP, COEFF_UPDATE_PROBS, DC_QLOOKUP, DEFAULT_COEFF_PROBS, KF_BMODE_PROBS};
+pub(crate) use crate::tables_rfc::{
+    AC_QLOOKUP, COEFF_UPDATE_PROBS, DC_QLOOKUP, DEFAULT_COEFF_PROBS, KF_BMODE_PROBS,
+};
 
 // Macroblock luma modes (section 8.2), then the inter modes (section 16.2),
 // in one numbering so a single field holds either.
@@ -33,11 +35,36 @@ pub(crate) const B_HD_PRED: u8 = 8;
 pub(crate) const B_HU_PRED: u8 = 9;
 
 /// Section 8.2 / 16.1: luma modes in inter frames.
-pub(crate) static YMODE_TREE: [i8; 8] = [-(DC_PRED as i8), 2, 4, 6, -(V_PRED as i8), -(H_PRED as i8), -(TM_PRED as i8), -(B_PRED as i8)];
+pub(crate) static YMODE_TREE: [i8; 8] = [
+    -(DC_PRED as i8),
+    2,
+    4,
+    6,
+    -(V_PRED as i8),
+    -(H_PRED as i8),
+    -(TM_PRED as i8),
+    -(B_PRED as i8),
+];
 /// Section 11.2: luma modes in key frames.
-pub(crate) static KF_YMODE_TREE: [i8; 8] = [-(B_PRED as i8), 2, 4, 6, -(DC_PRED as i8), -(V_PRED as i8), -(H_PRED as i8), -(TM_PRED as i8)];
+pub(crate) static KF_YMODE_TREE: [i8; 8] = [
+    -(B_PRED as i8),
+    2,
+    4,
+    6,
+    -(DC_PRED as i8),
+    -(V_PRED as i8),
+    -(H_PRED as i8),
+    -(TM_PRED as i8),
+];
 /// Section 11.4: chroma modes.
-pub(crate) static UV_MODE_TREE: [i8; 6] = [-(DC_PRED as i8), 2, -(V_PRED as i8), 4, -(H_PRED as i8), -(TM_PRED as i8)];
+pub(crate) static UV_MODE_TREE: [i8; 6] = [
+    -(DC_PRED as i8),
+    2,
+    -(V_PRED as i8),
+    4,
+    -(H_PRED as i8),
+    -(TM_PRED as i8),
+];
 /// Section 11.2: subblock modes.
 pub(crate) static BMODE_TREE: [i8; 18] = [
     -(B_DC_PRED as i8),
@@ -120,17 +147,39 @@ pub(crate) static COEFF_BANDS: [usize; 17] = [0, 1, 2, 3, 6, 4, 5, 6, 6, 6, 6, 6
 pub(crate) static ZIGZAG: [usize; 16] = [0, 1, 4, 8, 5, 2, 3, 6, 9, 12, 13, 10, 7, 11, 14, 15];
 
 /// Section 16.2: the macroblock inter mode tree.
-pub(crate) static MV_REF_TREE: [i8; 8] = [-(ZEROMV as i8), 2, -(NEARESTMV as i8), 4, -(NEARMV as i8), 6, -(NEWMV as i8), -(SPLITMV as i8)];
+pub(crate) static MV_REF_TREE: [i8; 8] = [
+    -(ZEROMV as i8),
+    2,
+    -(NEARESTMV as i8),
+    4,
+    -(NEARMV as i8),
+    6,
+    -(NEWMV as i8),
+    -(SPLITMV as i8),
+];
 /// Section 16.3: mode probabilities by neighbour census.
-pub(crate) static MODE_CONTEXTS: [[u8; 4]; 6] =
-    [[7, 1, 1, 143], [14, 18, 14, 107], [135, 64, 57, 68], [60, 56, 128, 65], [159, 134, 128, 34], [234, 188, 128, 28]];
+pub(crate) static MODE_CONTEXTS: [[u8; 4]; 6] = [
+    [7, 1, 1, 143],
+    [14, 18, 14, 107],
+    [135, 64, 57, 68],
+    [60, 56, 128, 65],
+    [159, 134, 128, 34],
+    [234, 188, 128, 28],
+];
 
 // SPLITMV partitionings (section 16.4).
 pub(crate) const MV_TOP_BOTTOM: u8 = 0;
 pub(crate) const MV_LEFT_RIGHT: u8 = 1;
 pub(crate) const MV_QUARTERS: u8 = 2;
 pub(crate) const MV_16: u8 = 3;
-pub(crate) static MV_PARTITION_TREE: [i8; 6] = [-(MV_16 as i8), 2, -(MV_QUARTERS as i8), 4, -(MV_TOP_BOTTOM as i8), -(MV_LEFT_RIGHT as i8)];
+pub(crate) static MV_PARTITION_TREE: [i8; 6] = [
+    -(MV_16 as i8),
+    2,
+    -(MV_QUARTERS as i8),
+    4,
+    -(MV_TOP_BOTTOM as i8),
+    -(MV_LEFT_RIGHT as i8),
+];
 pub(crate) static MV_PARTITION_PROBS: [u8; 3] = [110, 111, 150];
 /// Which part each subblock belongs to, by partitioning.
 pub(crate) static MV_PARTITIONS: [[u8; 16]; 4] = [
@@ -146,8 +195,21 @@ pub(crate) const LEFT4X4: u8 = 0;
 pub(crate) const ABOVE4X4: u8 = 1;
 pub(crate) const ZERO4X4: u8 = 2;
 pub(crate) const NEW4X4: u8 = 3;
-pub(crate) static SUB_MV_REF_TREE: [i8; 6] = [-(LEFT4X4 as i8), 2, -(ABOVE4X4 as i8), 4, -(ZERO4X4 as i8), -(NEW4X4 as i8)];
-pub(crate) static SUB_MV_REF_PROBS: [[u8; 3]; 5] = [[147, 136, 18], [106, 145, 1], [179, 121, 1], [223, 1, 34], [208, 1, 1]];
+pub(crate) static SUB_MV_REF_TREE: [i8; 6] = [
+    -(LEFT4X4 as i8),
+    2,
+    -(ABOVE4X4 as i8),
+    4,
+    -(ZERO4X4 as i8),
+    -(NEW4X4 as i8),
+];
+pub(crate) static SUB_MV_REF_PROBS: [[u8; 3]; 5] = [
+    [147, 136, 18],
+    [106, 145, 1],
+    [179, 121, 1],
+    [223, 1, 34],
+    [208, 1, 1],
+];
 
 // Motion vector component probabilities (section 17).
 pub(crate) const MVP_IS_SHORT: usize = 0;
@@ -157,12 +219,23 @@ pub(crate) const MVP_BITS: usize = 9;
 pub(crate) const MVP_COUNT: usize = 19;
 pub(crate) static SMALL_MV_TREE: [i8; 14] = [2, 8, 4, 6, -0, -1, -2, -3, 10, 12, -4, -5, -6, -7];
 pub(crate) static MV_UPDATE_PROBS: [[u8; MVP_COUNT]; 2] = [
-    [237, 246, 253, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 250, 250, 252, 254, 254],
-    [231, 243, 245, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 251, 251, 254, 254, 254],
+    [
+        237, 246, 253, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 250, 250, 252, 254,
+        254,
+    ],
+    [
+        231, 243, 245, 253, 254, 254, 254, 254, 254, 254, 254, 254, 254, 254, 251, 251, 254, 254,
+        254,
+    ],
 ];
 pub(crate) static DEFAULT_MV_PROBS: [[u8; MVP_COUNT]; 2] = [
-    [162, 128, 225, 146, 172, 147, 214, 39, 156, 128, 129, 132, 75, 145, 178, 206, 239, 254, 254],
-    [164, 128, 204, 170, 119, 235, 140, 230, 228, 128, 130, 130, 74, 148, 180, 203, 236, 254, 254],
+    [
+        162, 128, 225, 146, 172, 147, 214, 39, 156, 128, 129, 132, 75, 145, 178, 206, 239, 254, 254,
+    ],
+    [
+        164, 128, 204, 170, 119, 235, 140, 230, 228, 128, 130, 130, 74, 148, 180, 203, 236, 254,
+        254,
+    ],
 ];
 
 /// Section 18.3: the six-tap ("bicubic") subpixel filters by eighth-pel
@@ -194,7 +267,11 @@ mod tests {
     use super::*;
 
     fn leaves(tree: &[i8]) -> Vec<u8> {
-        let mut v: Vec<u8> = tree.iter().filter(|&&t| t <= 0).map(|&t| (-t) as u8).collect();
+        let mut v: Vec<u8> = tree
+            .iter()
+            .filter(|&&t| t <= 0)
+            .map(|&t| (-t) as u8)
+            .collect();
         v.sort();
         v
     }
@@ -218,10 +295,12 @@ mod tests {
         // Walk the anti-diagonals of a 4x4 block, alternating direction.
         let mut order = Vec::new();
         for d in 0..7i32 {
-            let cells: Vec<(i32, i32)> = (0..4).filter_map(|r| {
-                let c = d - r;
-                (0..4).contains(&c).then_some((r, c))
-            }).collect();
+            let cells: Vec<(i32, i32)> = (0..4)
+                .filter_map(|r| {
+                    let c = d - r;
+                    (0..4).contains(&c).then_some((r, c))
+                })
+                .collect();
             // Even diagonals run bottom-left to top-right (rows decreasing).
             if d % 2 == 0 {
                 order.extend(cells.iter().rev().map(|&(r, c)| (r * 4 + c) as usize));
@@ -241,11 +320,23 @@ mod tests {
 
     #[test]
     fn transcribed_tables_have_rfc_spot_values() {
-        assert_eq!(KF_BMODE_PROBS[0][0], [231, 120, 48, 89, 115, 113, 120, 152, 112]);
+        assert_eq!(
+            KF_BMODE_PROBS[0][0],
+            [231, 120, 48, 89, 115, 113, 120, 152, 112]
+        );
         assert_eq!(KF_BMODE_PROBS[9][9], [112, 19, 12, 61, 195, 128, 48, 4, 24]);
-        assert_eq!(DEFAULT_COEFF_PROBS[0][1][0], [253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128]);
-        assert_eq!(DEFAULT_COEFF_PROBS[3][7][2], [238, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128]);
-        assert_eq!(COEFF_UPDATE_PROBS[0][1][0], [176, 246, 255, 255, 255, 255, 255, 255, 255, 255, 255]);
+        assert_eq!(
+            DEFAULT_COEFF_PROBS[0][1][0],
+            [253, 136, 254, 255, 228, 219, 128, 128, 128, 128, 128]
+        );
+        assert_eq!(
+            DEFAULT_COEFF_PROBS[3][7][2],
+            [238, 1, 255, 128, 128, 128, 128, 128, 128, 128, 128]
+        );
+        assert_eq!(
+            COEFF_UPDATE_PROBS[0][1][0],
+            [176, 246, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+        );
         assert_eq!((DC_QLOOKUP[0], DC_QLOOKUP[127]), (4, 157));
         assert_eq!((AC_QLOOKUP[0], AC_QLOOKUP[127]), (4, 284));
         assert!(DC_QLOOKUP.windows(2).all(|w| w[0] <= w[1]));

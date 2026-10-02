@@ -32,6 +32,10 @@
 //! ```
 
 #![warn(missing_docs)]
+// The RFC's tables are indexed by several positions at once (plane type,
+// band, context, node); index loops say that more plainly than zipped
+// iterators.
+#![allow(clippy::needless_range_loop)]
 
 mod boolcoder;
 mod decoder;

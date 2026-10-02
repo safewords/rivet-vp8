@@ -43,7 +43,12 @@ pub(crate) struct Probs {
 
 impl Default for Probs {
     fn default() -> Self {
-        Probs { coeff: DEFAULT_COEFF_PROBS, ymode: DEFAULT_YMODE_PROBS, uvmode: DEFAULT_UV_MODE_PROBS, mv: DEFAULT_MV_PROBS }
+        Probs {
+            coeff: DEFAULT_COEFF_PROBS,
+            ymode: DEFAULT_YMODE_PROBS,
+            uvmode: DEFAULT_UV_MODE_PROBS,
+            mv: DEFAULT_MV_PROBS,
+        }
     }
 }
 
@@ -121,7 +126,10 @@ impl Dequant {
         let ac = |d: i32| AC_QLOOKUP[(base + d).clamp(0, 127) as usize] as i32;
         Dequant {
             y: [dc(q.y_dc_delta), ac(0)],
-            y2: [dc(q.y2_dc_delta) * 2, (ac(q.y2_ac_delta) * 155 / 100).max(8)],
+            y2: [
+                dc(q.y2_dc_delta) * 2,
+                (ac(q.y2_ac_delta) * 155 / 100).max(8),
+            ],
             uv: [dc(q.uv_dc_delta).min(132), ac(q.uv_ac_delta)],
         }
     }
@@ -171,10 +179,18 @@ pub(crate) struct PlaneBuf {
 
 impl PlaneBuf {
     fn new(width: usize, height: usize) -> Self {
-        PlaneBuf { data: vec![0; width * height], width, height }
+        PlaneBuf {
+            data: vec![0; width * height],
+            width,
+            height,
+        }
     }
     pub(crate) fn as_ref(&self) -> RefPlane<'_> {
-        RefPlane { data: &self.data, width: self.width, height: self.height }
+        RefPlane {
+            data: &self.data,
+            width: self.width,
+            height: self.height,
+        }
     }
 }
 
@@ -336,7 +352,8 @@ impl Decoder {
     /// The last frame decoded (shown or not), cropped to the coded size,
     /// or `None` before the first key frame.
     pub fn last_frame(&self) -> Option<Frame> {
-        self.have_key_frame.then(|| self.bufs[self.last].to_frame(self.width, self.height))
+        self.have_key_frame
+            .then(|| self.bufs[self.last].to_frame(self.width, self.height))
     }
 
     /// Decodes one compressed frame. Returns the picture if the frame is
@@ -344,7 +361,9 @@ impl Decoder {
     /// reference buffers (an altref, say).
     pub fn decode(&mut self, data: &[u8]) -> Result<Option<Frame>> {
         let (hdr, cur) = self.decode_frame(data)?;
-        Ok(hdr.show_frame.then(|| self.bufs[cur].to_frame(self.width, self.height)))
+        Ok(hdr
+            .show_frame
+            .then(|| self.bufs[cur].to_frame(self.width, self.height)))
     }
 
     /// Decodes a frame and returns its header and the buffer index holding
@@ -352,7 +371,10 @@ impl Decoder {
     pub(crate) fn decode_frame(&mut self, data: &[u8]) -> Result<(Header, usize)> {
         let mut hdr = Header::default();
         if data.len() < 3 {
-            return Err(bitstream(format!("frame of {} bytes is shorter than the frame tag", data.len())));
+            return Err(bitstream(format!(
+                "frame of {} bytes is shorter than the frame tag",
+                data.len()
+            )));
         }
         let tag = data[0] as u32 | (data[1] as u32) << 8 | (data[2] as u32) << 16;
         hdr.key_frame = tag & 1 == 0;
@@ -360,7 +382,10 @@ impl Decoder {
         hdr.show_frame = (tag >> 4) & 1 == 1;
         hdr.first_part_size = (tag >> 5) as usize;
         if hdr.version > 3 {
-            return Err(unsupported(format!("bitstream version {} (RFC 6386 defines 0-3)", hdr.version)));
+            return Err(unsupported(format!(
+                "bitstream version {} (RFC 6386 defines 0-3)",
+                hdr.version
+            )));
         }
         let mut pos = 3;
         if hdr.key_frame {
@@ -377,7 +402,10 @@ impl Decoder {
             hdr.horiz_scale = (w >> 14) as u8;
             hdr.vert_scale = (h >> 14) as u8;
             if hdr.width == 0 || hdr.height == 0 {
-                return Err(bitstream(format!("key frame size {}x{}", hdr.width, hdr.height)));
+                return Err(bitstream(format!(
+                    "key frame size {}x{}",
+                    hdr.width, hdr.height
+                )));
             }
             pos = 10;
         } else if !self.have_key_frame {
@@ -414,7 +442,9 @@ impl Decoder {
         let np = hdr.partitions;
         let sizes_len = 3 * (np - 1);
         if rest.len() < sizes_len {
-            return Err(bitstream("token partition sizes run past the end of the frame"));
+            return Err(bitstream(
+                "token partition sizes run past the end of the frame",
+            ));
         }
         let mut parts = Vec::with_capacity(np);
         let mut off = sizes_len;
@@ -426,14 +456,18 @@ impl Decoder {
                 rest.len().saturating_sub(off)
             };
             if off + size > rest.len() {
-                return Err(bitstream(format!("token partition {i} runs past the end of the frame")));
+                return Err(bitstream(format!(
+                    "token partition {i} runs past the end of the frame"
+                )));
             }
             parts.push(BoolDecoder::new(&rest[off..off + size]));
             off += size;
         }
 
         // A buffer no reference holds receives the new frame.
-        let cur = (0..self.bufs.len()).find(|&i| i != self.last && i != self.golden && i != self.altref).expect("four buffers");
+        let cur = (0..self.bufs.len())
+            .find(|&i| i != self.last && i != self.golden && i != self.altref)
+            .expect("four buffers");
         let mut frame = std::mem::take(&mut self.bufs[cur]);
         let result = self.decode_macroblocks(&hdr, &mut bd, &mut parts, &mut frame);
         if let Err(e) = result {
@@ -533,7 +567,12 @@ impl Decoder {
         hdr.sharpness = bd.literal(3) as u8;
         self.lf_deltas.enabled = bd.flag();
         if self.lf_deltas.enabled && bd.flag() {
-            for d in self.lf_deltas.refs.iter_mut().chain(self.lf_deltas.modes.iter_mut()) {
+            for d in self
+                .lf_deltas
+                .refs
+                .iter_mut()
+                .chain(self.lf_deltas.modes.iter_mut())
+            {
                 if bd.flag() {
                     *d = bd.signed(6) as i8;
                 }
@@ -636,19 +675,35 @@ impl Decoder {
         for s in 0..4 {
             let mut q = hdr.quant.y_ac;
             if self.seg.enabled {
-                q = if self.seg.absolute { self.seg.quant[s] as i32 } else { q + self.seg.quant[s] as i32 };
+                q = if self.seg.absolute {
+                    self.seg.quant[s] as i32
+                } else {
+                    q + self.seg.quant[s] as i32
+                };
                 let l = seg_level[s];
-                seg_level[s] = if self.seg.absolute { self.seg.lf[s] as i32 } else { l + self.seg.lf[s] as i32 }.clamp(0, 63);
+                seg_level[s] = if self.seg.absolute {
+                    self.seg.lf[s] as i32
+                } else {
+                    l + self.seg.lf[s] as i32
+                }
+                .clamp(0, 63);
             }
             dq[s] = Dequant::new(&hdr.quant, q.clamp(0, 127));
         }
-        let filters = if hdr.version == 0 { &SIXTAP_FILTERS } else { &BILINEAR_FILTERS };
+        let filters = if hdr.version == 0 {
+            &SIXTAP_FILTERS
+        } else {
+            &BILINEAR_FILTERS
+        };
         let full_pixel = hdr.version == 3;
 
         let stride = mbw + 1;
         let mut above_nz = vec![[0u8; 9]; mbw];
         let mut lf = vec![(0u8, false); mbw * mbh];
-        let mut coeffs = Coeffs { blocks: [[0; 16]; 25], nonzero: [false; 25] };
+        let mut coeffs = Coeffs {
+            blocks: [[0; 16]; 25],
+            nonzero: [false; 25],
+        };
         let np = parts.len();
         for mby in 0..mbh {
             let mut left_nz = [0u8; 9];
@@ -673,7 +728,15 @@ impl Decoder {
                     false
                 } else {
                     let part = &mut parts[mby % np];
-                    read_residual(part, &self.probs.coeff, has_y2, &dq[info.segment as usize], &mut above_nz[mbx], &mut left_nz, &mut coeffs)
+                    read_residual(
+                        part,
+                        &self.probs.coeff,
+                        has_y2,
+                        &dq[info.segment as usize],
+                        &mut above_nz[mbx],
+                        &mut left_nz,
+                        &mut coeffs,
+                    )
                 };
                 if has_y2 && coeffs.nonzero[24] {
                     let dc = inverse_wht(&coeffs.blocks[24]);
@@ -690,7 +753,16 @@ impl Decoder {
                         GOLDEN => self.golden,
                         _ => self.altref,
                     };
-                    reconstruct_inter(frame, &self.bufs[r], &info, mbx, mby, &coeffs, filters, full_pixel);
+                    reconstruct_inter(
+                        frame,
+                        &self.bufs[r],
+                        &info,
+                        mbx,
+                        mby,
+                        &coeffs,
+                        filters,
+                        full_pixel,
+                    );
                 }
 
                 // Section 15: no filtering at all when the frame's level is
@@ -716,13 +788,23 @@ impl Decoder {
 
     /// The macroblock header: segment, skip flag, modes and vectors
     /// (sections 10, 11, 16, 17; layout in section 19.3).
-    fn read_mb_header(&mut self, bd: &mut BoolDecoder, hdr: &Header, mbx: usize, mby: usize) -> MbInfo {
+    fn read_mb_header(
+        &mut self,
+        bd: &mut BoolDecoder,
+        hdr: &Header,
+        mbx: usize,
+        mby: usize,
+    ) -> MbInfo {
         let mut info = MbInfo::default();
         let mi = mby * self.mbw + mbx;
         if self.seg.update_map {
             self.seg_map[mi] = bd.tree(&MB_SEGMENT_TREE, &self.seg.tree_probs, 0);
         }
-        info.segment = if self.seg.enabled { self.seg_map[mi] } else { 0 };
+        info.segment = if self.seg.enabled {
+            self.seg_map[mi]
+        } else {
+            0
+        };
         info.skip = hdr.mb_no_skip_coeff && bd.read(hdr.prob_skip);
 
         let stride = self.mbw + 1;
@@ -733,9 +815,18 @@ impl Decoder {
                 let above = self.mbs[idx - stride].bmodes;
                 let left = self.mbs[idx - 1].bmodes;
                 for b in 0..16 {
-                    let a = if b < 4 { above[b + 12] } else { info.bmodes[b - 4] };
-                    let l = if b & 3 == 0 { left[b + 3] } else { info.bmodes[b - 1] };
-                    info.bmodes[b] = bd.tree(&BMODE_TREE, &KF_BMODE_PROBS[a as usize][l as usize], 0);
+                    let a = if b < 4 {
+                        above[b + 12]
+                    } else {
+                        info.bmodes[b - 4]
+                    };
+                    let l = if b & 3 == 0 {
+                        left[b + 3]
+                    } else {
+                        info.bmodes[b - 1]
+                    };
+                    info.bmodes[b] =
+                        bd.tree(&BMODE_TREE, &KF_BMODE_PROBS[a as usize][l as usize], 0);
                 }
             } else {
                 info.bmodes = [implied_bmode(info.ymode); 16];
@@ -787,10 +878,25 @@ impl Decoder {
                 let above = self.mbs[idx - stride].mvs;
                 let left = self.mbs[idx - 1].mvs;
                 for part in 0..MV_PARTITION_COUNT[partition] {
-                    let k = layout.iter().position(|&p| p as usize == part).expect("every part has a subblock");
-                    let lmv = if k & 3 != 0 { info.mvs[k - 1] } else { left[k + 3] };
-                    let amv = if k >= 4 { info.mvs[k - 4] } else { above[k + 12] };
-                    let mv = match bd.tree(&SUB_MV_REF_TREE, &SUB_MV_REF_PROBS[split_context(lmv, amv)], 0) {
+                    let k = layout
+                        .iter()
+                        .position(|&p| p as usize == part)
+                        .expect("every part has a subblock");
+                    let lmv = if k & 3 != 0 {
+                        info.mvs[k - 1]
+                    } else {
+                        left[k + 3]
+                    };
+                    let amv = if k >= 4 {
+                        info.mvs[k - 4]
+                    } else {
+                        above[k + 12]
+                    };
+                    let mv = match bd.tree(
+                        &SUB_MV_REF_TREE,
+                        &SUB_MV_REF_PROBS[split_context(lmv, amv)],
+                        0,
+                    ) {
                         LEFT4X4 => lmv,
                         ABOVE4X4 => amv,
                         ZERO4X4 => Mv::ZERO,
@@ -813,7 +919,10 @@ impl Decoder {
 
 impl Mv {
     pub(crate) fn add(self, d: Mv) -> Mv {
-        Mv { row: self.row.wrapping_add(d.row), col: self.col.wrapping_add(d.col) }
+        Mv {
+            row: self.row.wrapping_add(d.row),
+            col: self.col.wrapping_add(d.col),
+        }
     }
 }
 
@@ -852,8 +961,18 @@ pub(crate) struct NearMvs {
 
 /// Section 16.3: the reference vectors and mode census from the
 /// macroblocks above, to the left and above-left of `mbs[idx]`.
-pub(crate) fn find_near_mvs(mbs: &[MbInfo], idx: usize, stride: usize, ref_frame: u8, sign_bias: &[bool; 4]) -> NearMvs {
-    let neighbours = [(&mbs[idx - stride], 2u8), (&mbs[idx - 1], 2), (&mbs[idx - stride - 1], 1)];
+pub(crate) fn find_near_mvs(
+    mbs: &[MbInfo],
+    idx: usize,
+    stride: usize,
+    ref_frame: u8,
+    sign_bias: &[bool; 4],
+) -> NearMvs {
+    let neighbours = [
+        (&mbs[idx - stride], 2u8),
+        (&mbs[idx - 1], 2),
+        (&mbs[idx - stride - 1], 1),
+    ];
     let mut mvs = [Mv::ZERO; 4];
     let mut cnt = [0u8; 4];
     let mut n = 0;
@@ -867,7 +986,10 @@ pub(crate) fn find_near_mvs(mbs: &[MbInfo], idx: usize, stride: usize, ref_frame
         }
         let mut mv = nb.mv;
         if sign_bias[nb.ref_frame as usize] != sign_bias[ref_frame as usize] {
-            mv = Mv { row: mv.row.wrapping_neg(), col: mv.col.wrapping_neg() };
+            mv = Mv {
+                row: mv.row.wrapping_neg(),
+                col: mv.col.wrapping_neg(),
+            };
         }
         // A vector equal to the last one entered adds to its weight;
         // otherwise it is a new entry. (Entry 0 is the zero vector, which a
@@ -883,7 +1005,10 @@ pub(crate) fn find_near_mvs(mbs: &[MbInfo], idx: usize, stride: usize, ref_frame
     if cnt[3] > 0 && mvs[3] == mvs[1] {
         cnt[1] += 1;
     }
-    cnt[3] = neighbours.iter().map(|&(nb, w)| if nb.ymode == SPLITMV { w } else { 0 }).sum();
+    cnt[3] = neighbours
+        .iter()
+        .map(|&(nb, w)| if nb.ymode == SPLITMV { w } else { 0 })
+        .sum();
     if cnt[2] > cnt[1] {
         cnt.swap(1, 2);
         mvs.swap(1, 2);
@@ -891,7 +1016,12 @@ pub(crate) fn find_near_mvs(mbs: &[MbInfo], idx: usize, stride: usize, ref_frame
     if cnt[1] >= cnt[0] {
         mvs[0] = mvs[1];
     }
-    NearMvs { best: mvs[0], nearest: mvs[1], near: mvs[2], cnt }
+    NearMvs {
+        best: mvs[0],
+        nearest: mvs[1],
+        near: mvs[2],
+        cnt,
+    }
 }
 
 /// Section 16.3's `vp8_clamp_mv`: keeps a vector within [`MV_MARGIN`] of
@@ -901,7 +1031,10 @@ pub(crate) fn clamp_mv(mv: Mv, mbx: usize, mby: usize, mbw: usize, mbh: usize) -
     let to_right = ((mbw - 1 - mbx) * 64) as i32 + MV_MARGIN;
     let to_top = -((mby * 64) as i32) - MV_MARGIN;
     let to_bottom = ((mbh - 1 - mby) * 64) as i32 + MV_MARGIN;
-    Mv { row: (mv.row as i32).clamp(to_top, to_bottom) as i16, col: (mv.col as i32).clamp(to_left, to_right) as i16 }
+    Mv {
+        row: (mv.row as i32).clamp(to_top, to_bottom) as i16,
+        col: (mv.col as i32).clamp(to_left, to_right) as i16,
+    }
 }
 
 /// One motion vector component (section 17.1).
@@ -922,7 +1055,11 @@ pub(crate) fn read_mv_component(bd: &mut BoolDecoder, p: &[u8; MVP_COUNT]) -> i1
     } else {
         bd.tree(&SMALL_MV_TREE, &p[MVP_SHORT..MVP_SHORT + 7], 0) as i32
     };
-    if a != 0 && bd.read(p[MVP_SIGN]) { -a as i16 } else { a as i16 }
+    if a != 0 && bd.read(p[MVP_SIGN]) {
+        -a as i16
+    } else {
+        a as i16
+    }
 }
 
 /// A motion vector difference: row, then column (section 17.2).
@@ -980,7 +1117,14 @@ fn read_residual(
 /// One block's tokens (sections 13.2-13.3), dequantised with `dq` (DC, AC)
 /// into `out` in raster order. Returns (any non-zero coefficient, any token
 /// coded before the end of block).
-fn read_block(bd: &mut BoolDecoder, probs: &[[[u8; 11]; 3]; 8], first: usize, ctx: usize, out: &mut [i16; 16], dq: [i32; 2]) -> (bool, bool) {
+fn read_block(
+    bd: &mut BoolDecoder,
+    probs: &[[[u8; 11]; 3]; 8],
+    first: usize,
+    ctx: usize,
+    out: &mut [i16; 16],
+    dq: [i32; 2],
+) -> (bool, bool) {
     let mut i = first;
     let mut ctx = ctx;
     // After a zero the end-of-block branch is skipped (it cannot follow).
@@ -1035,14 +1179,27 @@ fn edge_px(p: &PlaneBuf, x: isize, y: isize) -> u8 {
 }
 
 /// Intra prediction and residue for one macroblock (sections 12, 14).
-pub(crate) fn reconstruct_intra(frame: &mut FrameBuf, info: &MbInfo, mbx: usize, mby: usize, mbw: usize, c: &Coeffs) {
+pub(crate) fn reconstruct_intra(
+    frame: &mut FrameBuf,
+    info: &MbInfo,
+    mbx: usize,
+    mby: usize,
+    mbw: usize,
+    c: &Coeffs,
+) {
     let p = &mut frame.planes[0];
     let stride = p.width;
     let (x0, y0) = (mbx * 16, mby * 16);
     if info.ymode == B_PRED {
         for b in 0..16 {
             let (above, left, top_left) = subblock_edge(p, mbx, mby, mbw, b);
-            let e = Edge { above: &above, left: &left, top_left, have_above: true, have_left: true };
+            let e = Edge {
+                above: &above,
+                left: &left,
+                top_left,
+                have_above: true,
+                have_left: true,
+            };
             let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
             predict_subblock(&mut p.data, off, stride, info.bmodes[b], &e);
             add_residue(&c.blocks[b], &mut p.data, off, stride);
@@ -1072,7 +1229,13 @@ pub(crate) fn reconstruct_intra(frame: &mut FrameBuf, info: &MbInfo, mbx: usize,
 /// their above-right pixels from the row above the macroblock — the
 /// pixels to their right are not decoded yet — and the last macroblock of
 /// a row repeats that row's last pixel; the top row of the frame uses 127.
-pub(crate) fn subblock_edge(p: &PlaneBuf, mbx: usize, mby: usize, mbw: usize, b: usize) -> ([u8; 8], [u8; 4], u8) {
+pub(crate) fn subblock_edge(
+    p: &PlaneBuf,
+    mbx: usize,
+    mby: usize,
+    mbw: usize,
+    b: usize,
+) -> ([u8; 8], [u8; 4], u8) {
     let stride = p.width;
     let (x0, y0) = (mbx * 16, mby * 16);
     let (bx, by) = (b & 3, b >> 2);
@@ -1117,7 +1280,13 @@ pub(crate) fn whole_edge(p: &PlaneBuf, x0: usize, y0: usize, n: usize) -> ([u8; 
 /// A whole-block intra mode over the `n`x`n` block at (`x0`, `y0`).
 fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mode: u8) {
     let (above, left, top_left) = whole_edge(p, x0, y0, n);
-    let e = Edge { above: &above, left: &left, top_left, have_above: y0 > 0, have_left: x0 > 0 };
+    let e = Edge {
+        above: &above,
+        left: &left,
+        top_left,
+        have_above: y0 > 0,
+        have_left: x0 > 0,
+    };
     let stride = p.width;
     predict_block(&mut p.data, y0 * stride + x0, stride, n, mode, &e);
 }
@@ -1128,11 +1297,20 @@ fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mode: u8) {
 pub(crate) fn chroma_mvs(info: &MbInfo, full_pixel: bool) -> [(i32, i32); 4] {
     std::array::from_fn(|k| {
         let (bx, by) = (2 * (k & 1), 2 * (k >> 1));
-        let blocks = [by * 4 + bx, by * 4 + bx + 1, by * 4 + bx + 4, by * 4 + bx + 5];
+        let blocks = [
+            by * 4 + bx,
+            by * 4 + bx + 1,
+            by * 4 + bx + 4,
+            by * 4 + bx + 5,
+        ];
         let avg = |f: fn(Mv) -> i32| {
             // Luma vectors doubled to eighth samples, summed, divided by 8.
             let s: i32 = blocks.iter().map(|&b| 2 * f(info.mvs[b])).sum();
-            let v = if s >= 0 { (s + 4) >> 3 } else { -((-s + 4) >> 3) };
+            let v = if s >= 0 {
+                (s + 4) >> 3
+            } else {
+                -((-s + 4) >> 3)
+            };
             if full_pixel { v & !7 } else { v }
         };
         (avg(|m| m.col as i32), avg(|m| m.row as i32))
@@ -1160,11 +1338,35 @@ pub(crate) fn reconstruct_inter(
         for b in 0..16 {
             let (x, y) = (x0 + 4 * (b & 3), y0 + 4 * (b >> 2));
             let mv = info.mvs[b];
-            predict_inter(src, &mut p.data, y * stride + x, stride, x as i32, y as i32, 4, 4, 2 * mv.col as i32, 2 * mv.row as i32, filters);
+            predict_inter(
+                src,
+                &mut p.data,
+                y * stride + x,
+                stride,
+                x as i32,
+                y as i32,
+                4,
+                4,
+                2 * mv.col as i32,
+                2 * mv.row as i32,
+                filters,
+            );
         }
     } else {
         let mv = info.mv;
-        predict_inter(src, &mut p.data, y0 * stride + x0, stride, x0 as i32, y0 as i32, 16, 16, 2 * mv.col as i32, 2 * mv.row as i32, filters);
+        predict_inter(
+            src,
+            &mut p.data,
+            y0 * stride + x0,
+            stride,
+            x0 as i32,
+            y0 as i32,
+            16,
+            16,
+            2 * mv.col as i32,
+            2 * mv.row as i32,
+            filters,
+        );
     }
     for b in 0..16 {
         let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
@@ -1179,11 +1381,35 @@ pub(crate) fn reconstruct_inter(
         let src = reference.planes[pi].as_ref();
         if cmv.iter().all(|&m| m == cmv[0]) {
             let (mx, my) = cmv[0];
-            predict_inter(src, &mut p.data, y0 * stride + x0, stride, x0 as i32, y0 as i32, 8, 8, mx, my, filters);
+            predict_inter(
+                src,
+                &mut p.data,
+                y0 * stride + x0,
+                stride,
+                x0 as i32,
+                y0 as i32,
+                8,
+                8,
+                mx,
+                my,
+                filters,
+            );
         } else {
             for (k, &(mx, my)) in cmv.iter().enumerate() {
                 let (x, y) = (x0 + 4 * (k & 1), y0 + 4 * (k >> 1));
-                predict_inter(src, &mut p.data, y * stride + x, stride, x as i32, y as i32, 4, 4, mx, my, filters);
+                predict_inter(
+                    src,
+                    &mut p.data,
+                    y * stride + x,
+                    stride,
+                    x as i32,
+                    y as i32,
+                    4,
+                    4,
+                    mx,
+                    my,
+                    filters,
+                );
             }
         }
         for b in 0..4 {
@@ -1195,7 +1421,13 @@ pub(crate) fn reconstruct_inter(
 
 /// The loop filter over the whole frame (section 15): `lf` holds each
 /// macroblock's level and whether its inner edges are filtered.
-pub(crate) fn loop_filter(frame: &mut FrameBuf, lf: &[(u8, bool)], mbw: usize, mbh: usize, hdr: &Header) {
+pub(crate) fn loop_filter(
+    frame: &mut FrameBuf,
+    lf: &[(u8, bool)],
+    mbw: usize,
+    mbh: usize,
+    hdr: &Header,
+) {
     let mut params = [Params::default(); 64];
     for (l, p) in params.iter_mut().enumerate().skip(1) {
         *p = Params::new(l as u8, hdr.sharpness, hdr.key_frame);
@@ -1273,10 +1505,30 @@ mod tests {
             let h = &d.last_header;
             println!(
                 "{i}: key={} ver={} show={} {}x{} scale={},{} simple={} level={} sharp={} parts={} q={:?} refresh_ent={} gold={}/{} alt={}/{} bias={},{} last={} noskip={} seg={:?} lfd={:?} {:?}",
-                h.key_frame, h.version, h.show_frame, h.width, h.height, h.horiz_scale, h.vert_scale, h.simple_filter,
-                h.filter_level, h.sharpness, h.partitions, h.quant, h.refresh_entropy, h.refresh_golden, h.copy_to_golden,
-                h.refresh_altref, h.copy_to_altref, h.sign_bias_golden, h.sign_bias_altref, h.refresh_last, h.mb_no_skip_coeff,
-                d.seg, d.lf_deltas, res.err()
+                h.key_frame,
+                h.version,
+                h.show_frame,
+                h.width,
+                h.height,
+                h.horiz_scale,
+                h.vert_scale,
+                h.simple_filter,
+                h.filter_level,
+                h.sharpness,
+                h.partitions,
+                h.quant,
+                h.refresh_entropy,
+                h.refresh_golden,
+                h.copy_to_golden,
+                h.refresh_altref,
+                h.copy_to_altref,
+                h.sign_bias_golden,
+                h.sign_bias_altref,
+                h.refresh_last,
+                h.mb_no_skip_coeff,
+                d.seg,
+                d.lf_deltas,
+                res.err()
             );
         }
     }

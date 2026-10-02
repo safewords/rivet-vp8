@@ -10,13 +10,21 @@ fn stream() -> &'static [Vec<u8>] {
     static S: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
     S.get_or_init(|| {
         let (w, h) = (48u32, 32u32);
-        let mut enc = Encoder::new(Config { width: w, height: h, quantizer: 30, keyframe_interval: 0, ..Default::default() }).unwrap();
+        let mut enc = Encoder::new(Config {
+            width: w,
+            height: h,
+            quantizer: 30,
+            keyframe_interval: 0,
+            ..Default::default()
+        })
+        .unwrap();
         (0..4)
             .map(|t| {
                 let mut f = Frame::new(w, h).unwrap();
                 for (i, p) in f.plane_mut(0).iter_mut().enumerate() {
                     let (x, y) = (i as u32 % w, i as u32 / w);
-                    *p = ((x * 7 + y * 3 + t * 5) % 256) as u8 ^ if (x + t) / 8 % 2 == 0 { 0x40 } else { 0 };
+                    *p = ((x * 7 + y * 3 + t * 5) % 256) as u8
+                        ^ if (x + t) / 8 % 2 == 0 { 0x40 } else { 0 };
                 }
                 enc.encode(&f).unwrap()
             })
@@ -29,7 +37,8 @@ fn stream() -> &'static [Vec<u8>] {
 fn vector() -> &'static [Vec<u8>] {
     static S: std::sync::OnceLock<Vec<Vec<u8>>> = std::sync::OnceLock::new();
     S.get_or_init(|| {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/vp80-00-comprehensive-007.ivf");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/vp80-00-comprehensive-007.ivf");
         let data = std::fs::read(path).unwrap();
         let mut r = vp8::ivf::IvfReader::new(&data[..]).unwrap();
         let mut frames = Vec::new();

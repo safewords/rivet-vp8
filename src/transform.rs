@@ -19,7 +19,12 @@ const SIN_PI8_SQRT2: i32 = 35468;
 pub(crate) fn inverse_wht(input: &[i16; 16]) -> [i16; 16] {
     let mut tmp = [0i16; 16];
     for i in 0..4 {
-        let (i0, i4, i8, i12) = (input[i] as i32, input[4 + i] as i32, input[8 + i] as i32, input[12 + i] as i32);
+        let (i0, i4, i8, i12) = (
+            input[i] as i32,
+            input[4 + i] as i32,
+            input[8 + i] as i32,
+            input[12 + i] as i32,
+        );
         let a1 = i0 + i12;
         let b1 = i4 + i8;
         let c1 = i4 - i8;
@@ -60,7 +65,12 @@ pub(crate) fn inverse_dct(input: &[i16; 16]) -> [i16; 16] {
     let mut tmp = [0i16; 16];
     // Vertical pass: one column at a time.
     for i in 0..4 {
-        let (i0, i4, i8, i12) = (input[i] as i32, input[4 + i] as i32, input[8 + i] as i32, input[12 + i] as i32);
+        let (i0, i4, i8, i12) = (
+            input[i] as i32,
+            input[4 + i] as i32,
+            input[8 + i] as i32,
+            input[12 + i] as i32,
+        );
         let a1 = i0 + i8;
         let b1 = i0 - i8;
         let c1 = mul_sin(i4) - mul_cos(i12);
@@ -194,7 +204,11 @@ mod tests {
                         }
                     }
                     let want = s / 2.0;
-                    assert!((got[y * 4 + x] as f64 - want).abs() <= 1.5, "{coeffs:?} at {y},{x}: {} vs {want}", got[y * 4 + x]);
+                    assert!(
+                        (got[y * 4 + x] as f64 - want).abs() <= 1.5,
+                        "{coeffs:?} at {y},{x}: {} vs {want}",
+                        got[y * 4 + x]
+                    );
                 }
             }
         }
@@ -206,7 +220,10 @@ mod tests {
             let mut c = [0i16; 16];
             c[0] = dc;
             let out = inverse_dct(&c);
-            assert!(out.iter().all(|&v| v as i32 == (dc as i32 + 4) >> 3), "{dc}: {out:?}");
+            assert!(
+                out.iter().all(|&v| v as i32 == (dc as i32 + 4) >> 3),
+                "{dc}: {out:?}"
+            );
         }
     }
 
@@ -232,7 +249,11 @@ mod tests {
         for dc in [-1000i16, -5, 0, 5, 1000] {
             let mut c = [0i16; 16];
             c[0] = dc;
-            assert!(inverse_wht(&c).iter().all(|&v| v as i32 == (dc as i32 + 3) >> 3));
+            assert!(
+                inverse_wht(&c)
+                    .iter()
+                    .all(|&v| v as i32 == (dc as i32 + 3) >> 3)
+            );
         }
     }
 

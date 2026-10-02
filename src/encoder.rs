@@ -22,8 +22,8 @@
 
 use crate::boolcoder::{BoolEncoder, cost, tree_cost, tree_path};
 use crate::decoder::{
-    Decoder, Dequant, FrameBuf, INTRA, LAST, MbInfo, Mv, PlaneBuf, Probs, QuantIndices, chroma_mvs, clamp_mv,
-    find_near_mvs, implied_bmode, subblock_edge, whole_edge,
+    Decoder, Dequant, FrameBuf, INTRA, LAST, MbInfo, Mv, PlaneBuf, Probs, QuantIndices, chroma_mvs,
+    clamp_mv, find_near_mvs, implied_bmode, subblock_edge, whole_edge,
 };
 use crate::error::{Result, config};
 use crate::frame::Frame;
@@ -58,7 +58,15 @@ impl Default for Config {
     /// 0x0 (set the size), quantiser 40, a key frame every 120 frames,
     /// automatic loop filter, search range 16.
     fn default() -> Self {
-        Config { width: 0, height: 0, quantizer: 40, keyframe_interval: 120, loop_filter_level: None, sharpness: 0, search_range: 16 }
+        Config {
+            width: 0,
+            height: 0,
+            quantizer: 40,
+            keyframe_interval: 120,
+            loop_filter_level: None,
+            sharpness: 0,
+            search_range: 16,
+        }
     }
 }
 
@@ -104,7 +112,10 @@ impl Encoder {
     /// An encoder for frames of `cfg.width` x `cfg.height`.
     pub fn new(cfg: Config) -> Result<Encoder> {
         if cfg.width == 0 || cfg.height == 0 || cfg.width > 16383 || cfg.height > 16383 {
-            return Err(config(format!("frame size {}x{}: VP8 codes 1 to 16383 samples each way", cfg.width, cfg.height)));
+            return Err(config(format!(
+                "frame size {}x{}: VP8 codes 1 to 16383 samples each way",
+                cfg.width, cfg.height
+            )));
         }
         if cfg.quantizer > 127 {
             return Err(config(format!("quantizer {} (0 to 127)", cfg.quantizer)));
@@ -120,7 +131,14 @@ impl Encoder {
         }
         let mbw = (cfg.width as usize).div_ceil(16);
         let mbh = (cfg.height as usize).div_ceil(16);
-        Ok(Encoder { cfg, mbw, mbh, frames: 0, force_key: false, dec: Decoder::new() })
+        Ok(Encoder {
+            cfg,
+            mbw,
+            mbh,
+            frames: 0,
+            force_key: false,
+            dec: Decoder::new(),
+        })
     }
 
     /// The settings.
@@ -148,7 +166,9 @@ impl Encoder {
             )));
         }
         let interval = self.cfg.keyframe_interval as u64;
-        let key = self.frames == 0 || self.force_key || (interval > 0 && self.frames.is_multiple_of(interval));
+        let key = self.frames == 0
+            || self.force_key
+            || (interval > 0 && self.frames.is_multiple_of(interval));
         self.force_key = false;
         let src = pad_source(frame, self.mbw, self.mbh);
         let bytes = self.encode_frame(&src, key)?;
@@ -161,27 +181,57 @@ impl Encoder {
     fn encode_frame(&mut self, src: &FrameBuf, key: bool) -> Result<Vec<u8>> {
         let (mbw, mbh) = (self.mbw, self.mbh);
         let q = self.cfg.quantizer as i32;
-        let dq = Dequant::new(&QuantIndices { y_ac: q, ..Default::default() }, q);
+        let dq = Dequant::new(
+            &QuantIndices {
+                y_ac: q,
+                ..Default::default()
+            },
+            q,
+        );
         let lambda = (dq.y[1] * dq.y[1]) as f64 / 32.0;
-        let probs = if key { Probs::default() } else { self.dec.probs().clone() };
+        let probs = if key {
+            Probs::default()
+        } else {
+            self.dec.probs().clone()
+        };
 
         let mut recon = FrameBuf {
             planes: [
-                PlaneBuf { data: vec![0; mbw * 16 * mbh * 16], width: mbw * 16, height: mbh * 16 },
-                PlaneBuf { data: vec![0; mbw * 8 * mbh * 8], width: mbw * 8, height: mbh * 8 },
-                PlaneBuf { data: vec![0; mbw * 8 * mbh * 8], width: mbw * 8, height: mbh * 8 },
+                PlaneBuf {
+                    data: vec![0; mbw * 16 * mbh * 16],
+                    width: mbw * 16,
+                    height: mbh * 16,
+                },
+                PlaneBuf {
+                    data: vec![0; mbw * 8 * mbh * 8],
+                    width: mbw * 8,
+                    height: mbh * 8,
+                },
+                PlaneBuf {
+                    data: vec![0; mbw * 8 * mbh * 8],
+                    width: mbw * 8,
+                    height: mbh * 8,
+                },
             ],
         };
         let stride = mbw + 1;
         let mut mbs = vec![MbInfo::default(); stride * (mbh + 1)];
         let mut codes = Vec::with_capacity(mbw * mbh);
-        let reference = if key { None } else { Some(self.dec.last_reference().clone()) };
+        let reference = if key {
+            None
+        } else {
+            Some(self.dec.last_reference().clone())
+        };
         for mby in 0..mbh {
             for mbx in 0..mbw {
                 let idx = (mby + 1) * stride + mbx + 1;
                 let code = match &reference {
-                    None => self.code_intra_mb(src, &mut recon, mbx, mby, &dq, lambda, &mbs, idx, true, &probs),
-                    Some(r) => self.code_inter_mb(src, &mut recon, r, mbx, mby, &dq, lambda, &mbs, idx, &probs),
+                    None => self.code_intra_mb(
+                        src, &mut recon, mbx, mby, &dq, lambda, &mbs, idx, true, &probs,
+                    ),
+                    Some(r) => self.code_inter_mb(
+                        src, &mut recon, r, mbx, mby, &dq, lambda, &mbs, idx, &probs,
+                    ),
                 };
                 mbs[idx] = code.info;
                 codes.push(code);
@@ -213,11 +263,23 @@ impl Encoder {
 
         // The 16x16 modes, each coded in full.
         let (above, left, top_left) = whole_edge(&recon.planes[0], x0, y0, 16);
-        let e = Edge { above: &above, left: &left, top_left, have_above: y0 > 0, have_left: x0 > 0 };
-        let mode_cost = |m: u8| {
-            if key { tree_cost(&KF_YMODE_TREE, &KF_YMODE_PROBS, 0, m) } else { tree_cost(&YMODE_TREE, &probs.ymode, 0, m) }
+        let e = Edge {
+            above: &above,
+            left: &left,
+            top_left,
+            have_above: y0 > 0,
+            have_left: x0 > 0,
         };
-        let mut best16: Option<(f64, u8, [[i16; 16]; 25], [u8; 256])> = None;
+        let mode_cost = |m: u8| {
+            if key {
+                tree_cost(&KF_YMODE_TREE, &KF_YMODE_PROBS, 0, m)
+            } else {
+                tree_cost(&YMODE_TREE, &probs.ymode, 0, m)
+            }
+        };
+        // (cost, mode, levels, reconstruction)
+        type Candidate = (f64, u8, [[i16; 16]; 25], [u8; 256]);
+        let mut best16: Option<Candidate> = None;
         for mode in [DC_PRED, V_PRED, H_PRED, TM_PRED] {
             let mut pred = [0u8; 256];
             predict_block(&mut pred, 0, 16, 16, mode, &e);
@@ -245,12 +307,27 @@ impl Encoder {
             for b in 0..16 {
                 let (bx, by) = (b & 3, b >> 2);
                 let off = (y0 + 4 * by) * stride + x0 + 4 * bx;
-                let sb: [u8; 16] = std::array::from_fn(|i| s[(4 * by + i / 4) * 16 + 4 * bx + i % 4]);
+                let sb: [u8; 16] =
+                    std::array::from_fn(|i| s[(4 * by + i / 4) * 16 + 4 * bx + i % 4]);
                 let (ab, lb, tl) = subblock_edge(p, mbx, mby, self.mbw, b);
-                let ctx_a = if b < 4 { above_modes[b + 12] } else { bmodes[b - 4] };
-                let ctx_l = if b & 3 == 0 { left_modes[b + 3] } else { bmodes[b - 1] };
+                let ctx_a = if b < 4 {
+                    above_modes[b + 12]
+                } else {
+                    bmodes[b - 4]
+                };
+                let ctx_l = if b & 3 == 0 {
+                    left_modes[b + 3]
+                } else {
+                    bmodes[b - 1]
+                };
                 let mprobs = &KF_BMODE_PROBS[ctx_a as usize][ctx_l as usize];
-                let e = Edge { above: &ab, left: &lb, top_left: tl, have_above: true, have_left: true };
+                let e = Edge {
+                    above: &ab,
+                    left: &lb,
+                    top_left: tl,
+                    have_above: true,
+                    have_left: true,
+                };
                 let mut best: Option<(f64, u8, [i16; 16], [i16; 16])> = None;
                 for m in 0..10u8 {
                     let mut pred = [0u8; 16];
@@ -300,7 +377,13 @@ impl Encoder {
             for (k, pred) in preds.iter_mut().enumerate() {
                 let p = &recon.planes[1 + k];
                 let (above, left, top_left) = whole_edge(p, mbx * 8, mby * 8, 8);
-                let e = Edge { above: &above, left: &left, top_left, have_above: mby > 0, have_left: mbx > 0 };
+                let e = Edge {
+                    above: &above,
+                    left: &left,
+                    top_left,
+                    have_above: mby > 0,
+                    have_left: mbx > 0,
+                };
                 predict_block(pred, 0, 8, 8, mode, &e);
             }
             let d = sse(&su, &preds[0]) + sse(&sv, &preds[1]);
@@ -309,9 +392,24 @@ impl Encoder {
             }
         }
         info.uvmode = best_uv.1;
-        code_chroma(recon, mbx, mby, &su, &sv, &best_uv.2, &best_uv.3, dq, &mut levels);
+        code_chroma(
+            recon,
+            mbx,
+            mby,
+            &su,
+            &sv,
+            &best_uv.2,
+            &best_uv.3,
+            dq,
+            &mut levels,
+        );
         info.skip = levels.iter().all(|b| b.iter().all(|&l| l == 0));
-        MbCode { info, levels, best: Mv::ZERO, mode_probs: [0; 4] }
+        MbCode {
+            info,
+            levels,
+            best: Mv::ZERO,
+            mode_probs: [0; 4],
+        }
     }
 
     /// Codes a macroblock of an inter frame: a motion search against the
@@ -347,12 +445,42 @@ impl Encoder {
         // are known.
         let inter_flag = 256;
         let predict = |mv: Mv, out: &mut [u8; 256]| {
-            predict_inter(refy, out, 0, 16, x0 as i32, y0 as i32, 16, 16, 2 * mv.col as i32, 2 * mv.row as i32, &SIXTAP_FILTERS);
+            predict_inter(
+                refy,
+                out,
+                0,
+                16,
+                x0 as i32,
+                y0 as i32,
+                16,
+                16,
+                2 * mv.col as i32,
+                2 * mv.row as i32,
+                &SIXTAP_FILTERS,
+            );
         };
 
         // Motion search.
-        let lim = clamp_mv(Mv { row: i16::MIN, col: i16::MIN }, mbx, mby, mbw, mbh);
-        let lim_hi = clamp_mv(Mv { row: i16::MAX, col: i16::MAX }, mbx, mby, mbw, mbh);
+        let lim = clamp_mv(
+            Mv {
+                row: i16::MIN,
+                col: i16::MIN,
+            },
+            mbx,
+            mby,
+            mbw,
+            mbh,
+        );
+        let lim_hi = clamp_mv(
+            Mv {
+                row: i16::MAX,
+                col: i16::MAX,
+            },
+            mbx,
+            mby,
+            mbw,
+            mbh,
+        );
         let in_range = |mv: Mv| {
             mv.row >= lim.row
                 && mv.row <= lim_hi.row
@@ -362,8 +490,13 @@ impl Encoder {
                 && (mv.col as i32 - best.col as i32).abs() <= 1023
         };
         let mv_cost = |mv: Mv| {
-            mv_bits(&probs.mv, Mv { row: mv.row - best.row, col: mv.col - best.col })
-                + tree_cost(&MV_REF_TREE, &mode_probs, 0, NEWMV)
+            mv_bits(
+                &probs.mv,
+                Mv {
+                    row: mv.row - best.row,
+                    col: mv.col - best.col,
+                },
+            ) + tree_cost(&MV_REF_TREE, &mode_probs, 0, NEWMV)
         };
         let full_sad = |mv: Mv| -> f64 {
             let mut pred = [0u8; 256];
@@ -382,22 +515,44 @@ impl Encoder {
                 }
             }
         };
-        let round_px = |mv: Mv| Mv { row: (mv.row as i32 & !3) as i16, col: (mv.col as i32 & !3) as i16 };
+        let round_px = |mv: Mv| Mv {
+            row: (mv.row as i32 & !3) as i16,
+            col: (mv.col as i32 & !3) as i16,
+        };
         for c in [Mv::ZERO, round_px(best), round_px(nearest), round_px(nearv)] {
             try_mv(c, &mut best_mv, &mut best_j);
         }
         // Coarse grid around the zero vector, then a descending diamond.
         for dy in (-range..=range).step_by(16) {
             for dx in (-range..=range).step_by(16) {
-                try_mv(Mv { row: dy as i16, col: dx as i16 }, &mut best_mv, &mut best_j);
+                try_mv(
+                    Mv {
+                        row: dy as i16,
+                        col: dx as i16,
+                    },
+                    &mut best_mv,
+                    &mut best_j,
+                );
             }
         }
         // Steps in quarter samples: 2 and 1 sample, then half and quarter.
         for step in [8, 4, 2, 1] {
             for _ in 0..16 {
                 let centre = best_mv;
-                for (dy, dx) in [(-step, 0), (step, 0), (0, -step), (0, step), (-step, -step), (-step, step), (step, -step), (step, step)] {
-                    let c = Mv { row: (centre.row as i32 + dy) as i16, col: (centre.col as i32 + dx) as i16 };
+                for (dy, dx) in [
+                    (-step, 0),
+                    (step, 0),
+                    (0, -step),
+                    (0, step),
+                    (-step, -step),
+                    (-step, step),
+                    (step, -step),
+                    (step, step),
+                ] {
+                    let c = Mv {
+                        row: (centre.row as i32 + dy) as i16,
+                        col: (centre.col as i32 + dx) as i16,
+                    };
                     try_mv(c, &mut best_mv, &mut best_j);
                 }
                 if best_mv == centre {
@@ -408,9 +563,21 @@ impl Encoder {
 
         // Candidate modes, by prediction error plus rate.
         let mut cands: Vec<(u8, Mv, u32)> = vec![
-            (ZEROMV, Mv::ZERO, tree_cost(&MV_REF_TREE, &mode_probs, 0, ZEROMV)),
-            (NEARESTMV, nearest, tree_cost(&MV_REF_TREE, &mode_probs, 0, NEARESTMV)),
-            (NEARMV, nearv, tree_cost(&MV_REF_TREE, &mode_probs, 0, NEARMV)),
+            (
+                ZEROMV,
+                Mv::ZERO,
+                tree_cost(&MV_REF_TREE, &mode_probs, 0, ZEROMV),
+            ),
+            (
+                NEARESTMV,
+                nearest,
+                tree_cost(&MV_REF_TREE, &mode_probs, 0, NEARESTMV),
+            ),
+            (
+                NEARMV,
+                nearv,
+                tree_cost(&MV_REF_TREE, &mode_probs, 0, NEARMV),
+            ),
         ];
         if !cands.iter().any(|c| c.1 == best_mv) {
             cands.push((NEWMV, best_mv, mv_cost(best_mv)));
@@ -428,21 +595,36 @@ impl Encoder {
 
         // A 16x16 intra mode instead, if its prediction is better.
         let (above, left, top_left) = whole_edge(&recon.planes[0], x0, y0, 16);
-        let e = Edge { above: &above, left: &left, top_left, have_above: y0 > 0, have_left: x0 > 0 };
+        let e = Edge {
+            above: &above,
+            left: &left,
+            top_left,
+            have_above: y0 > 0,
+            have_left: x0 > 0,
+        };
         let mut intra_j = f64::MAX;
         for m in [DC_PRED, V_PRED, H_PRED, TM_PRED] {
             let mut p = [0u8; 256];
             predict_block(&mut p, 0, 16, 16, m, &e);
-            let j = sad(&s, &p) as f64 + lambda_sad * (tree_cost(&YMODE_TREE, &probs.ymode, 0, m) + 2 * inter_flag) as f64 / 256.0;
+            let j = sad(&s, &p) as f64
+                + lambda_sad * (tree_cost(&YMODE_TREE, &probs.ymode, 0, m) + 2 * inter_flag) as f64
+                    / 256.0;
             intra_j = intra_j.min(j);
         }
         if intra_j < j_inter {
-            let mut c = self.code_intra_mb(src, recon, mbx, mby, dq, lambda, mbs, idx, false, probs);
+            let mut c =
+                self.code_intra_mb(src, recon, mbx, mby, dq, lambda, mbs, idx, false, probs);
             c.mode_probs = mode_probs;
             return c;
         }
 
-        let mut info = MbInfo { ymode: mode, ref_frame: LAST, mv, mvs: [mv; 16], ..MbInfo::default() };
+        let mut info = MbInfo {
+            ymode: mode,
+            ref_frame: LAST,
+            mv,
+            mvs: [mv; 16],
+            ..MbInfo::default()
+        };
         info.bmodes = [B_DC_PRED; 16];
         let mut levels = [[0i16; 16]; 25];
         let (rec, _) = code_luma_y2(&s, &pred, dq, &mut levels);
@@ -455,19 +637,55 @@ impl Encoder {
         for (k, pred) in preds.iter_mut().enumerate() {
             let r = reference.planes[1 + k].as_ref();
             let (mx, my) = cmv[0];
-            predict_inter(r, pred, 0, 8, (mbx * 8) as i32, (mby * 8) as i32, 8, 8, mx, my, &SIXTAP_FILTERS);
+            predict_inter(
+                r,
+                pred,
+                0,
+                8,
+                (mbx * 8) as i32,
+                (mby * 8) as i32,
+                8,
+                8,
+                mx,
+                my,
+                &SIXTAP_FILTERS,
+            );
         }
-        code_chroma(recon, mbx, mby, &su, &sv, &preds[0], &preds[1], dq, &mut levels);
+        code_chroma(
+            recon,
+            mbx,
+            mby,
+            &su,
+            &sv,
+            &preds[0],
+            &preds[1],
+            dq,
+            &mut levels,
+        );
         info.skip = levels.iter().all(|b| b.iter().all(|&l| l == 0));
-        MbCode { info, levels, best, mode_probs }
+        MbCode {
+            info,
+            levels,
+            best,
+            mode_probs,
+        }
     }
 
     /// Writes the frame: uncompressed chunk, first partition (header and
     /// modes), one token partition.
-    fn write_frame(&self, key: bool, codes: &[MbCode], mbs: &[MbInfo], mut probs: Probs) -> Result<Vec<u8>> {
+    fn write_frame(
+        &self,
+        key: bool,
+        codes: &[MbCode],
+        mbs: &[MbInfo],
+        mut probs: Probs,
+    ) -> Result<Vec<u8>> {
         let (mbw, mbh) = (self.mbw, self.mbh);
         let q = self.cfg.quantizer as u32;
-        let level = self.cfg.loop_filter_level.unwrap_or_else(|| auto_filter_level(q as i32)) as u32;
+        let level = self
+            .cfg
+            .loop_filter_level
+            .unwrap_or_else(|| auto_filter_level(q as i32)) as u32;
 
         // Token statistics, for the probability updates.
         let mut counts: Counts = [[[[[0; 2]; 11]; 3]; 8]; 4];
@@ -487,9 +705,15 @@ impl Encoder {
                         let total = n0 + n1;
                         let mut new = old;
                         if total > 0 {
-                            let p = ((256 * n0 as u64 + total as u64 / 2) / total as u64).clamp(1, 255) as u8;
-                            let old_cost = n0 as u64 * cost(old, false) as u64 + n1 as u64 * cost(old, true) as u64 + cost(up, false) as u64;
-                            let new_cost = n0 as u64 * cost(p, false) as u64 + n1 as u64 * cost(p, true) as u64 + cost(up, true) as u64 + 8 * 256;
+                            let p = ((256 * n0 as u64 + total as u64 / 2) / total as u64)
+                                .clamp(1, 255) as u8;
+                            let old_cost = n0 as u64 * cost(old, false) as u64
+                                + n1 as u64 * cost(old, true) as u64
+                                + cost(up, false) as u64;
+                            let new_cost = n0 as u64 * cost(p, false) as u64
+                                + n1 as u64 * cost(p, true) as u64
+                                + cost(up, true) as u64
+                                + 8 * 256;
                             if new_cost < old_cost {
                                 new = p;
                             }
@@ -582,9 +806,22 @@ impl Encoder {
                     let above = mbs[idx - stride].bmodes;
                     let left = mbs[idx - 1].bmodes;
                     for b in 0..16 {
-                        let a = if b < 4 { above[b + 12] } else { info.bmodes[b - 4] };
-                        let l = if b & 3 == 0 { left[b + 3] } else { info.bmodes[b - 1] };
-                        h.tree(&BMODE_TREE, &KF_BMODE_PROBS[a as usize][l as usize], 0, info.bmodes[b]);
+                        let a = if b < 4 {
+                            above[b + 12]
+                        } else {
+                            info.bmodes[b - 4]
+                        };
+                        let l = if b & 3 == 0 {
+                            left[b + 3]
+                        } else {
+                            info.bmodes[b - 1]
+                        };
+                        h.tree(
+                            &BMODE_TREE,
+                            &KF_BMODE_PROBS[a as usize][l as usize],
+                            0,
+                            info.bmodes[b],
+                        );
                     }
                 }
                 h.tree(&UV_MODE_TREE, &KF_UV_MODE_PROBS, 0, info.uvmode);
@@ -605,7 +842,14 @@ impl Encoder {
             h.write(255, false); // last frame
             h.tree(&MV_REF_TREE, &code.mode_probs, 0, info.ymode);
             if info.ymode == NEWMV {
-                write_mv(&mut h, &probs.mv, Mv { row: info.mv.row - code.best.row, col: info.mv.col - code.best.col });
+                write_mv(
+                    &mut h,
+                    &probs.mv,
+                    Mv {
+                        row: info.mv.row - code.best.row,
+                        col: info.mv.col - code.best.col,
+                    },
+                );
             }
         }
         let first = h.finish();
@@ -658,7 +902,11 @@ fn pad_source(frame: &Frame, mbw: usize, mbh: usize) -> FrameBuf {
                 out[y * w + x] = data[sy * fw + x.min(fw - 1)];
             }
         }
-        *p = PlaneBuf { data: out, width: w, height: h };
+        *p = PlaneBuf {
+            data: out,
+            width: w,
+            height: h,
+        };
     }
     FrameBuf { planes }
 }
@@ -680,11 +928,17 @@ fn put_block(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, b: &[u8]) {
 }
 
 fn sse(a: &[u8], b: &[u8]) -> u64 {
-    a.iter().zip(b).map(|(&x, &y)| ((x as i32 - y as i32) * (x as i32 - y as i32)) as u64).sum()
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| ((x as i32 - y as i32) * (x as i32 - y as i32)) as u64)
+        .sum()
 }
 
 fn sad(a: &[u8], b: &[u8]) -> u32 {
-    a.iter().zip(b).map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs()).sum()
+    a.iter()
+        .zip(b)
+        .map(|(&x, &y)| (x as i32 - y as i32).unsigned_abs())
+        .sum()
 }
 
 /// Quantises `c` (a forward DCT or WHT, raster order) from coefficient
@@ -715,7 +969,12 @@ fn code_4x4(src: &[u8; 16], pred: &[u8; 16], q: [i32; 2], first: usize) -> ([i16
 /// Codes a 16x16 luma residue with a Y2 block: returns the reconstruction
 /// and an estimate of the rate (1/256 bits); `levels` receives Y 0-15 and
 /// Y2 (24).
-fn code_luma_y2(src: &[u8; 256], pred: &[u8; 256], dq: &Dequant, levels: &mut [[i16; 16]; 25]) -> ([u8; 256], u32) {
+fn code_luma_y2(
+    src: &[u8; 256],
+    pred: &[u8; 256],
+    dq: &Dequant,
+    levels: &mut [[i16; 16]; 25],
+) -> ([u8; 256], u32) {
     let mut coefs = [[0i16; 16]; 16];
     let mut dcs = [0i16; 16];
     for b in 0..16 {
@@ -780,7 +1039,11 @@ fn block_rate(lv: &[i16; 16], first: usize) -> u32 {
     let mut r = 256; // end of block
     for &z in &ZIGZAG[first..=last] {
         let a = lv[z].unsigned_abs() as u32;
-        r += if a == 0 { 384 } else { 768 + 512 * (32 - a.leading_zeros()) };
+        r += if a == 0 {
+            384
+        } else {
+            768 + 512 * (32 - a.leading_zeros())
+        };
     }
     r
 }
@@ -820,7 +1083,13 @@ fn walk_tokens(codes: &[MbCode], mbw: usize, mbh: usize, mut emit: impl FnMut(us
             for (base, off) in [(16, 4), (20, 6)] {
                 for b in 0..4 {
                     let (x, y) = (b & 1, b >> 1);
-                    let nz = block_tokens(&lv[base + b], 2, 0, (a[off + x] + left[off + y]) as usize, &mut emit);
+                    let nz = block_tokens(
+                        &lv[base + b],
+                        2,
+                        0,
+                        (a[off + x] + left[off + y]) as usize,
+                        &mut emit,
+                    );
                     a[off + x] = nz as u8;
                     left[off + y] = nz as u8;
                 }
@@ -831,9 +1100,19 @@ fn walk_tokens(codes: &[MbCode], mbw: usize, mbh: usize, mut emit: impl FnMut(us
 
 /// The tokens of one block (section 13.2); returns whether it has a
 /// non-zero level.
-fn block_tokens(lv: &[i16; 16], t: usize, first: usize, ctx: usize, emit: &mut impl FnMut(usize, Slot, bool)) -> bool {
+fn block_tokens(
+    lv: &[i16; 16],
+    t: usize,
+    first: usize,
+    ctx: usize,
+    emit: &mut impl FnMut(usize, Slot, bool),
+) -> bool {
     let mut path = [(0usize, false); 16];
-    let mut put = |token: u8, start: usize, band: usize, ctx: usize, emit: &mut dyn FnMut(usize, Slot, bool)| {
+    let mut put = |token: u8,
+                   start: usize,
+                   band: usize,
+                   ctx: usize,
+                   emit: &mut dyn FnMut(usize, Slot, bool)| {
         let n = tree_path(&COEFF_TREE, start, token, &mut path).expect("a token");
         for &(node, bit) in &path[..n] {
             emit(t, Slot::Tree(band, ctx, node >> 1), bit);
@@ -914,7 +1193,8 @@ fn mv_bits(p: &[[u8; MVP_COUNT]; 2], d: Mv) -> u32 {
 fn mv_component_bits(p: &[u8; MVP_COUNT], v: i16) -> u32 {
     let a = v.unsigned_abs() as u32;
     let mut c = if a < 8 {
-        cost(p[MVP_IS_SHORT], false) + tree_cost(&SMALL_MV_TREE, &p[MVP_SHORT..MVP_SHORT + 7], 0, a as u8)
+        cost(p[MVP_IS_SHORT], false)
+            + tree_cost(&SMALL_MV_TREE, &p[MVP_SHORT..MVP_SHORT + 7], 0, a as u8)
     } else {
         let mut c = cost(p[MVP_IS_SHORT], true);
         for i in (0..10).filter(|&i| i != 3) {
@@ -939,7 +1219,10 @@ mod tests {
     #[test]
     fn mv_components_round_trip() {
         let p = DEFAULT_MV_PROBS;
-        let values: Vec<i16> = (-1023..=1023).step_by(7).chain([0, 1, -1, 7, 8, 15, 16, -8, 1023, -1023]).collect();
+        let values: Vec<i16> = (-1023..=1023)
+            .step_by(7)
+            .chain([0, 1, -1, 7, 8, 15, 16, -8, 1023, -1023])
+            .collect();
         let mut h = BoolEncoder::new();
         for &v in &values {
             write_mv_component(&mut h, &p[0], v);

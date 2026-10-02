@@ -55,7 +55,12 @@ impl Frame {
         check_size(width, height)?;
         let planes = layout(width, height);
         let len = planes[2].offset + planes[2].len();
-        Ok(Frame { width, height, data: vec![128; len], planes })
+        Ok(Frame {
+            width,
+            height,
+            data: vec![128; len],
+            planes,
+        })
     }
 
     /// A frame from three planes, each tightly packed: `y` is `width *
@@ -63,7 +68,11 @@ impl Frame {
     pub fn from_planes(width: u32, height: u32, y: &[u8], u: &[u8], v: &[u8]) -> Result<Frame> {
         check_size(width, height)?;
         let planes = layout(width, height);
-        for (p, s, name) in [(&planes[0], y, "Y"), (&planes[1], u, "U"), (&planes[2], v, "V")] {
+        for (p, s, name) in [
+            (&planes[0], y, "Y"),
+            (&planes[1], u, "U"),
+            (&planes[2], v, "V"),
+        ] {
             if s.len() != p.len() {
                 return Err(config(format!(
                     "{name} plane is {} bytes, a {width}x{height} frame needs {}",
@@ -76,7 +85,12 @@ impl Frame {
         data.extend_from_slice(y);
         data.extend_from_slice(u);
         data.extend_from_slice(v);
-        Ok(Frame { width, height, data, planes })
+        Ok(Frame {
+            width,
+            height,
+            data,
+            planes,
+        })
     }
 
     /// A frame from a packed I420 buffer (Y, U, V back to back, as
@@ -91,7 +105,12 @@ impl Frame {
                 data.len()
             )));
         }
-        Ok(Frame { width, height, data, planes })
+        Ok(Frame {
+            width,
+            height,
+            data,
+            planes,
+        })
     }
 
     /// The samples of plane `i` (0 Y, 1 U, 2 V).
@@ -131,8 +150,20 @@ fn layout(width: u32, height: u32) -> [Plane; 3] {
     let ylen = width as usize * height as usize;
     let clen = cw as usize * ch as usize;
     [
-        Plane { offset: 0, width, height },
-        Plane { offset: ylen, width: cw, height: ch },
-        Plane { offset: ylen + clen, width: cw, height: ch },
+        Plane {
+            offset: 0,
+            width,
+            height,
+        },
+        Plane {
+            offset: ylen,
+            width: cw,
+            height: ch,
+        },
+        Plane {
+            offset: ylen + clen,
+            width: cw,
+            height: ch,
+        },
     ]
 }
