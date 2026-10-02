@@ -287,7 +287,9 @@ pub struct Decoder {
     /// vectors, B_DC_PRED).
     mbs: Vec<MbInfo>,
     have_key_frame: bool,
-    /// The header of the last frame decoded (for the encoder's tests).
+    /// The key frame's upscaling codes (section 9.1).
+    scaling: (u8, u8),
+    /// The header of the last frame decoded (for the header dump test).
     pub(crate) last_header: Header,
 }
 
@@ -329,6 +331,7 @@ impl Decoder {
             seg_map: Vec::new(),
             mbs: Vec::new(),
             have_key_frame: false,
+            scaling: (0, 0),
             last_header: Header::default(),
         }
     }
@@ -347,6 +350,14 @@ impl Decoder {
     /// The coded size of the stream (0x0 before the first key frame).
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// The upscaling the last key frame asks for, horizontal and vertical:
+    /// 0 none, 1 by 5/4, 2 by 5/3, 3 by 2 (RFC 6386 section 9.1). Decoding
+    /// is unaffected — pictures come out at the coded size — and any
+    /// resampler may apply it for display.
+    pub fn scaling(&self) -> (u8, u8) {
+        self.scaling
     }
 
     /// The last frame decoded (shown or not), cropped to the coded size,
@@ -425,6 +436,7 @@ impl Decoder {
             if hdr.width != self.width || hdr.height != self.height || self.bufs.is_empty() {
                 self.resize(hdr.width, hdr.height);
             }
+            self.scaling = (hdr.horiz_scale, hdr.vert_scale);
             // A key frame restores the decoder's initial state (section 4).
             self.probs = Probs::default();
             self.seg = Segmentation::default();
@@ -437,44 +449,15 @@ impl Decoder {
 
         let mut bd = BoolDecoder::new(first);
         let saved_probs = self.read_header(&mut bd, &mut hdr)?;
-
-        // Token partitions (section 9.5).
-        let np = hdr.partitions;
-        let sizes_len = 3 * (np - 1);
-        if rest.len() < sizes_len {
-            return Err(bitstream(
-                "token partition sizes run past the end of the frame",
-            ));
-        }
-        let mut parts = Vec::with_capacity(np);
-        let mut off = sizes_len;
-        for i in 0..np {
-            let size = if i + 1 < np {
-                let s = &rest[3 * i..3 * i + 3];
-                s[0] as usize | (s[1] as usize) << 8 | (s[2] as usize) << 16
-            } else {
-                rest.len().saturating_sub(off)
-            };
-            if off + size > rest.len() {
-                return Err(bitstream(format!(
-                    "token partition {i} runs past the end of the frame"
-                )));
+        let cur = match self.decode_partitions(&hdr, &mut bd, rest) {
+            Ok(cur) => cur,
+            Err(e) => {
+                if let Some(p) = saved_probs {
+                    self.probs = p;
+                }
+                return Err(e);
             }
-            parts.push(BoolDecoder::new(&rest[off..off + size]));
-            off += size;
-        }
-
-        // A buffer no reference holds receives the new frame.
-        let cur = (0..self.bufs.len())
-            .find(|&i| i != self.last && i != self.golden && i != self.altref)
-            .expect("four buffers");
-        let mut frame = std::mem::take(&mut self.bufs[cur]);
-        let result = self.decode_macroblocks(&hdr, &mut bd, &mut parts, &mut frame);
-        if let Err(e) = result {
-            self.bufs[cur] = frame;
-            return Err(e);
-        }
-        self.bufs[cur] = frame;
+        };
 
         // References (sections 9.7, 9.8). Copies read the buffers as they
         // were before this frame.
@@ -512,6 +495,49 @@ impl Decoder {
         }
         self.last_header = hdr.clone();
         Ok((hdr, cur))
+    }
+
+    /// Sets up the token partitions (section 9.5) and decodes the
+    /// macroblocks into a free buffer; returns its index.
+    fn decode_partitions(
+        &mut self,
+        hdr: &Header,
+        bd: &mut BoolDecoder,
+        rest: &[u8],
+    ) -> Result<usize> {
+        let np = hdr.partitions;
+        let sizes_len = 3 * (np - 1);
+        if rest.len() < sizes_len {
+            return Err(bitstream(
+                "token partition sizes run past the end of the frame",
+            ));
+        }
+        let mut parts = Vec::with_capacity(np);
+        let mut off = sizes_len;
+        for i in 0..np {
+            let size = if i + 1 < np {
+                let s = &rest[3 * i..3 * i + 3];
+                s[0] as usize | (s[1] as usize) << 8 | (s[2] as usize) << 16
+            } else {
+                rest.len() - off
+            };
+            if off + size > rest.len() {
+                return Err(bitstream(format!(
+                    "token partition {i} runs past the end of the frame"
+                )));
+            }
+            parts.push(BoolDecoder::new(&rest[off..off + size]));
+            off += size;
+        }
+
+        // A buffer no reference holds receives the new frame.
+        let cur = (0..self.bufs.len())
+            .find(|&i| i != self.last && i != self.golden && i != self.altref)
+            .expect("four buffers, three references");
+        let mut frame = std::mem::take(&mut self.bufs[cur]);
+        let result = self.decode_macroblocks(hdr, bd, &mut parts, &mut frame);
+        self.bufs[cur] = frame;
+        result.map(|()| cur)
     }
 
     fn resize(&mut self, width: u32, height: u32) {
