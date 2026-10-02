@@ -197,6 +197,7 @@ impl BoolEncoder {
     }
 
     /// Magnitude then sign, the inverse of [`BoolDecoder::signed`].
+    #[cfg(test)]
     pub(crate) fn signed(&mut self, n: u32, v: i32) {
         self.literal(n, v.unsigned_abs());
         self.flag(v < 0);
@@ -222,15 +223,10 @@ impl BoolEncoder {
         }
         self.out
     }
-
-    /// Bytes written so far (a lower bound on the final size).
-    pub(crate) fn len(&self) -> usize {
-        self.out.len()
-    }
 }
 
 /// The (node, bit) steps from node `start` to leaf `value`.
-fn tree_path(tree: &Tree, start: usize, value: u8, path: &mut [(usize, bool); 16]) -> Option<usize> {
+pub(crate) fn tree_path(tree: &Tree, start: usize, value: u8, path: &mut [(usize, bool); 16]) -> Option<usize> {
     fn walk(tree: &Tree, node: usize, value: u8, depth: usize, path: &mut [(usize, bool); 16]) -> Option<usize> {
         for bit in 0..2 {
             path[depth] = (node, bit == 1);

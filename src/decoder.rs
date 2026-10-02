@@ -317,6 +317,17 @@ impl Decoder {
         }
     }
 
+    /// The probabilities in force for the next frame (the encoder codes
+    /// against them).
+    pub(crate) fn probs(&self) -> &Probs {
+        &self.probs
+    }
+
+    /// The last-frame reference (the encoder predicts from it).
+    pub(crate) fn last_reference(&self) -> &FrameBuf {
+        &self.bufs[self.last]
+    }
+
     /// The coded size of the stream (0x0 before the first key frame).
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
@@ -894,7 +905,7 @@ pub(crate) fn clamp_mv(mv: Mv, mbx: usize, mby: usize, mbw: usize, mbh: usize) -
 }
 
 /// One motion vector component (section 17.1).
-fn read_mv_component(bd: &mut BoolDecoder, p: &[u8; MVP_COUNT]) -> i16 {
+pub(crate) fn read_mv_component(bd: &mut BoolDecoder, p: &[u8; MVP_COUNT]) -> i16 {
     let a = if bd.read(p[MVP_IS_SHORT]) {
         let mut a = 0i32;
         for i in 0..3 {
@@ -1029,33 +1040,12 @@ pub(crate) fn reconstruct_intra(frame: &mut FrameBuf, info: &MbInfo, mbx: usize,
     let stride = p.width;
     let (x0, y0) = (mbx * 16, mby * 16);
     if info.ymode == B_PRED {
-        // The four pixels above and to the right of the macroblock, used by
-        // every subblock of its right column (section 12.3).
-        let mut above_right = [127u8; 4];
-        if mby > 0 {
-            if mbx + 1 < mbw {
-                above_right.copy_from_slice(&p.data[(y0 - 1) * stride + x0 + 16..][..4]);
-            } else {
-                above_right = [p.data[(y0 - 1) * stride + x0 + 15]; 4];
-            }
-        }
         for b in 0..16 {
-            let (bx, by) = (b & 3, b >> 2);
-            let (x, y) = (x0 + 4 * bx, y0 + 4 * by);
-            let mut above = [127u8; 8];
-            if y > 0 {
-                above[..4].copy_from_slice(&p.data[(y - 1) * stride + x..][..4]);
-            }
-            if bx == 3 {
-                above[4..].copy_from_slice(&above_right);
-            } else if y > 0 {
-                above[4..].copy_from_slice(&p.data[(y - 1) * stride + x + 4..][..4]);
-            }
-            let left: [u8; 4] = std::array::from_fn(|r| edge_px(p, x as isize - 1, (y + r) as isize));
-            let top_left = edge_px(p, x as isize - 1, y as isize - 1);
+            let (above, left, top_left) = subblock_edge(p, mbx, mby, mbw, b);
             let e = Edge { above: &above, left: &left, top_left, have_above: true, have_left: true };
-            predict_subblock(&mut p.data, y * stride + x, stride, info.bmodes[b], &e);
-            add_residue(&c.blocks[b], &mut p.data, y * stride + x, stride);
+            let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
+            predict_subblock(&mut p.data, off, stride, info.bmodes[b], &e);
+            add_residue(&c.blocks[b], &mut p.data, off, stride);
         }
     } else {
         predict_whole(p, x0, y0, 16, info.ymode);
@@ -1076,8 +1066,41 @@ pub(crate) fn reconstruct_intra(frame: &mut FrameBuf, info: &MbInfo, mbx: usize,
     }
 }
 
-/// A whole-block intra mode over the `n`x`n` block at (`x0`, `y0`).
-pub(crate) fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mode: u8) {
+/// The edge of luma subblock `b` of the macroblock at (`mbx`, `mby`):
+/// the 4 pixels above and the 4 above-right, the 4 to the left, and the
+/// one above-left (section 12.3). Subblocks of the right column take
+/// their above-right pixels from the row above the macroblock — the
+/// pixels to their right are not decoded yet — and the last macroblock of
+/// a row repeats that row's last pixel; the top row of the frame uses 127.
+pub(crate) fn subblock_edge(p: &PlaneBuf, mbx: usize, mby: usize, mbw: usize, b: usize) -> ([u8; 8], [u8; 4], u8) {
+    let stride = p.width;
+    let (x0, y0) = (mbx * 16, mby * 16);
+    let (bx, by) = (b & 3, b >> 2);
+    let (x, y) = (x0 + 4 * bx, y0 + 4 * by);
+    let mut above = [127u8; 8];
+    if y > 0 {
+        above[..4].copy_from_slice(&p.data[(y - 1) * stride + x..][..4]);
+    }
+    if bx == 3 {
+        if mby > 0 {
+            if mbx + 1 < mbw {
+                above[4..].copy_from_slice(&p.data[(y0 - 1) * stride + x0 + 16..][..4]);
+            } else {
+                above[4..].fill(p.data[(y0 - 1) * stride + x0 + 15]);
+            }
+        }
+    } else if y > 0 {
+        above[4..].copy_from_slice(&p.data[(y - 1) * stride + x + 4..][..4]);
+    }
+    let left: [u8; 4] = std::array::from_fn(|r| edge_px(p, x as isize - 1, (y + r) as isize));
+    let top_left = edge_px(p, x as isize - 1, y as isize - 1);
+    (above, left, top_left)
+}
+
+/// The edge of the `n`x`n` block at (`x0`, `y0`) for the whole-block intra
+/// modes: the row above, the column to the left, the pixel above-left
+/// (section 12.2).
+pub(crate) fn whole_edge(p: &PlaneBuf, x0: usize, y0: usize, n: usize) -> ([u8; 16], [u8; 16], u8) {
     let mut above = [127u8; 16];
     let mut left = [129u8; 16];
     if y0 > 0 {
@@ -1088,7 +1111,12 @@ pub(crate) fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mo
             *l = p.data[(y0 + r) * p.width + x0 - 1];
         }
     }
-    let top_left = edge_px(p, x0 as isize - 1, y0 as isize - 1);
+    (above, left, edge_px(p, x0 as isize - 1, y0 as isize - 1))
+}
+
+/// A whole-block intra mode over the `n`x`n` block at (`x0`, `y0`).
+fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mode: u8) {
+    let (above, left, top_left) = whole_edge(p, x0, y0, n);
     let e = Edge { above: &above, left: &left, top_left, have_above: y0 > 0, have_left: x0 > 0 };
     let stride = p.width;
     predict_block(&mut p.data, y0 * stride + x0, stride, n, mode, &e);
