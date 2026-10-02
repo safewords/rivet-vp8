@@ -1,0 +1,28 @@
+[package]
+name = "rivet-vp8"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license-file = "LICENSE.md"
+readme = "README.md"
+repository = "https://github.com/rivet-transcoder/rivet-vp8"
+homepage = "https://github.com/rivet-transcoder/rivet-vp8"
+documentation = "https://docs.rs/rivet-vp8"
+authors = ["Ely Erin Fox"]
+description = "A VP8 decoder and encoder in Rust, written from RFC 6386: no C, no system libraries, no build script. Every feature of the bitstream decodes (bit-exact on the comprehensive test vectors); the encoder writes key frames and whole-pixel inter frames. IVF in and out. rivet's VP8 codec. Imported as `vp8`."
+keywords = ["vp8", "video", "decoder", "encoder", "codec"]
+categories = ["multimedia::video", "multimedia::encoding"]
+exclude = [".github/", "tools/"]
+
+[lib]
+name = "vp8"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+md5 = "0.7"
+
+[features]
+default = []

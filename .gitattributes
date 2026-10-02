@@ -1,0 +1,5 @@
+# Golden MD5 lists and scripts must check out with LF on every platform;
+# a core.autocrlf=true checkout would otherwise put a carriage return
+# after every MD5.
+* text=auto eol=lf
+*.ivf binary
