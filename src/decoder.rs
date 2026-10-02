@@ -1515,6 +1515,160 @@ pub(crate) fn loop_filter(
 mod tests {
     use super::*;
 
+    fn inter(ref_frame: u8, row: i16, col: i16) -> MbInfo {
+        let mv = Mv { row, col };
+        MbInfo {
+            ymode: NEWMV,
+            ref_frame,
+            mv,
+            mvs: [mv; 16],
+            ..MbInfo::default()
+        }
+    }
+
+    /// A 2x2 grid of macroblock info with a border, the current macroblock
+    /// at the bottom right (index 4 + 4 = 8, stride 3), its neighbours set
+    /// to `above`, `left`, `above_left`.
+    fn census(
+        above: MbInfo,
+        left: MbInfo,
+        above_left: MbInfo,
+        ref_frame: u8,
+        bias: [bool; 4],
+    ) -> NearMvs {
+        let mut mbs = vec![MbInfo::default(); 9];
+        mbs[5] = above;
+        mbs[7] = left;
+        mbs[4] = above_left;
+        find_near_mvs(&mbs, 8, 3, ref_frame, &bias)
+    }
+
+    #[test]
+    fn census_weights_and_order() {
+        // Section 16.3: above and left weigh 2, above-left 1; equal vectors
+        // merge; zero vectors count towards cnt[0].
+        let n = census(
+            inter(LAST, 4, 8),
+            inter(LAST, 4, 8),
+            inter(LAST, 0, 0),
+            LAST,
+            [false; 4],
+        );
+        assert_eq!(n.cnt, [1, 4, 0, 0]);
+        assert_eq!(
+            (n.nearest, n.best),
+            (Mv { row: 4, col: 8 }, Mv { row: 4, col: 8 })
+        );
+        // Distinct vectors: the heavier becomes "nearest" (swapped in).
+        let n = census(
+            inter(LAST, 2, 2),
+            inter(LAST, 6, 6),
+            inter(LAST, 6, 6),
+            LAST,
+            [false; 4],
+        );
+        assert_eq!(n.cnt, [0, 3, 2, 0]);
+        assert_eq!(
+            (n.nearest, n.near),
+            (Mv { row: 6, col: 6 }, Mv { row: 2, col: 2 })
+        );
+        let n = census(
+            inter(LAST, 2, 2),
+            inter(LAST, 6, 6),
+            inter(LAST, 2, 2),
+            LAST,
+            [false; 4],
+        );
+        // Three entries (the third equal to the first, but not to the one
+        // before it): the third merges into "nearest".
+        assert_eq!(n.cnt, [0, 3, 2, 0]);
+        assert_eq!(
+            (n.nearest, n.near),
+            (Mv { row: 2, col: 2 }, Mv { row: 6, col: 6 })
+        );
+        // Intra neighbours add nothing; SPLITMV neighbours fill cnt[3].
+        let mut split = inter(LAST, 1, 1);
+        split.ymode = SPLITMV;
+        let n = census(MbInfo::default(), split, split, LAST, [false; 4]);
+        assert_eq!(n.cnt, [0, 3, 0, 3]);
+        // "best" stays zero while the zero vector outweighs "nearest".
+        let n = census(
+            inter(LAST, 0, 0),
+            inter(LAST, 0, 0),
+            inter(LAST, 5, 5),
+            LAST,
+            [false; 4],
+        );
+        assert_eq!((n.cnt[0], n.best), (4, Mv::ZERO));
+    }
+
+    #[test]
+    fn census_applies_sign_bias() {
+        // A golden-frame neighbour's vector is negated for a last-frame
+        // macroblock when the two references' sign biases differ.
+        let bias = [false, false, true, false];
+        let n = census(
+            inter(GOLDEN, 4, -8),
+            MbInfo::default(),
+            MbInfo::default(),
+            LAST,
+            bias,
+        );
+        assert_eq!(n.nearest, Mv { row: -4, col: 8 });
+        let n = census(
+            inter(GOLDEN, 4, -8),
+            MbInfo::default(),
+            MbInfo::default(),
+            GOLDEN,
+            bias,
+        );
+        assert_eq!(n.nearest, Mv { row: 4, col: -8 });
+        // After negation it can merge with a last-frame neighbour.
+        let n = census(
+            inter(GOLDEN, 4, -8),
+            inter(LAST, -4, 8),
+            MbInfo::default(),
+            LAST,
+            bias,
+        );
+        assert_eq!(n.cnt[1], 4);
+    }
+
+    #[test]
+    fn split_contexts() {
+        let z = Mv::ZERO;
+        let a = Mv { row: 1, col: 0 };
+        let b = Mv { row: 0, col: 1 };
+        assert_eq!(split_context(z, z), 4);
+        assert_eq!(split_context(a, a), 3);
+        assert_eq!(split_context(a, z), 2);
+        assert_eq!(split_context(z, a), 1);
+        assert_eq!(split_context(a, b), 0);
+    }
+
+    #[test]
+    fn clamp_margins() {
+        // 16 samples (64 quarter samples) past the macroblock-aligned edges.
+        let far = Mv {
+            row: -2000,
+            col: 2000,
+        };
+        assert_eq!(
+            clamp_mv(far, 0, 0, 4, 3),
+            Mv {
+                row: -64,
+                col: 3 * 64 + 64
+            }
+        );
+        assert_eq!(
+            clamp_mv(far, 3, 2, 4, 3),
+            Mv {
+                row: -2 * 64 - 64,
+                col: 64
+            }
+        );
+    }
+
     /// Prints the headers of an IVF file's frames: `VP8_DUMP=path cargo
     /// test dump_headers -- --ignored --nocapture`.
     #[test]

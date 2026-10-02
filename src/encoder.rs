@@ -52,11 +52,14 @@ pub struct Config {
     pub sharpness: u8,
     /// Motion search range in whole luma samples (1 to 64).
     pub search_range: u8,
+    /// Token partitions: 1, 2, 4 or 8 (macroblock rows take them in turn,
+    /// so a decoder can work on several rows at once).
+    pub token_partitions: u8,
 }
 
 impl Default for Config {
     /// 0x0 (set the size), quantiser 40, a key frame every 120 frames,
-    /// automatic loop filter, search range 16.
+    /// automatic loop filter, search range 16, one token partition.
     fn default() -> Self {
         Config {
             width: 0,
@@ -66,6 +69,7 @@ impl Default for Config {
             loop_filter_level: None,
             sharpness: 0,
             search_range: 16,
+            token_partitions: 1,
         }
     }
 }
@@ -125,6 +129,9 @@ impl Encoder {
         }
         if cfg.sharpness > 7 {
             return Err(config("sharpness above 7"));
+        }
+        if ![1, 2, 4, 8].contains(&cfg.token_partitions) {
+            return Err(config("token partitions must be 1, 2, 4 or 8"));
         }
         if cfg.search_range == 0 || cfg.search_range > 64 {
             return Err(config("search range must be 1 to 64"));
@@ -689,7 +696,7 @@ impl Encoder {
 
         // Token statistics, for the probability updates.
         let mut counts: Counts = [[[[[0; 2]; 11]; 3]; 8]; 4];
-        walk_tokens(codes, mbw, mbh, |t, slot, bit| {
+        walk_tokens(codes, mbw, mbh, |_, t, slot, bit| {
             if let Slot::Tree(b, c, n) = slot {
                 counts[t][b][c][n][bit as usize] += 1;
             }
@@ -743,7 +750,8 @@ impl Encoder {
         h.literal(6, level);
         h.literal(3, self.cfg.sharpness as u32);
         h.flag(false); // no mode / reference filter deltas
-        h.literal(2, 0); // one token partition
+        let np = self.cfg.token_partitions as usize;
+        h.literal(2, np.trailing_zeros()); // token partitions
         h.literal(7, q);
         for _ in 0..5 {
             h.flag(false); // no quantiser deltas
@@ -854,18 +862,22 @@ impl Encoder {
         }
         let first = h.finish();
 
-        // The token partition.
-        let mut tk = BoolEncoder::new();
-        walk_tokens(codes, mbw, mbh, |t, slot, bit| match slot {
-            Slot::Tree(b, c, n) => tk.write(probs.coeff[t][b][c][n], bit),
-            Slot::Fixed(p) => tk.write(p, bit),
+        // The token partitions: macroblock row r goes to partition r % np.
+        let mut tk: Vec<BoolEncoder> = (0..np).map(|_| BoolEncoder::new()).collect();
+        walk_tokens(codes, mbw, mbh, |mby, t, slot, bit| {
+            let p = match slot {
+                Slot::Tree(b, c, n) => probs.coeff[t][b][c][n],
+                Slot::Fixed(p) => p,
+            };
+            tk[mby % np].write(p, bit);
         });
-        let tokens = tk.finish();
+        let parts: Vec<Vec<u8>> = tk.into_iter().map(BoolEncoder::finish).collect();
+        let tokens_len: usize = parts.iter().map(Vec::len).sum();
 
         if first.len() >= 1 << 19 {
             return Err(config("first partition above 512 KiB: raise the quantiser"));
         }
-        let mut out = Vec::with_capacity(10 + first.len() + tokens.len());
+        let mut out = Vec::with_capacity(10 + first.len() + 3 * np + tokens_len);
         let tag = (!key as u32) | (1 << 4) | ((first.len() as u32) << 5);
         out.extend_from_slice(&tag.to_le_bytes()[..3]);
         if key {
@@ -874,7 +886,16 @@ impl Encoder {
             out.extend_from_slice(&(self.cfg.height as u16).to_le_bytes());
         }
         out.extend_from_slice(&first);
-        out.extend_from_slice(&tokens);
+        // Every partition's size but the last, 24 bits each (section 9.5).
+        for p in &parts[..np - 1] {
+            if p.len() >= 1 << 24 {
+                return Err(config("token partition above 16 MiB: raise the quantiser"));
+            }
+            out.extend_from_slice(&(p.len() as u32).to_le_bytes()[..3]);
+        }
+        for p in &parts {
+            out.extend_from_slice(p);
+        }
         Ok(out)
     }
 }
@@ -1048,11 +1069,17 @@ fn block_rate(lv: &[i16; 16], first: usize) -> u32 {
     r
 }
 
-/// Calls `emit(plane type, slot, bit)` for every bool of every token of
-/// the frame, in partition order, with the contexts of section 13.3.
-fn walk_tokens(codes: &[MbCode], mbw: usize, mbh: usize, mut emit: impl FnMut(usize, Slot, bool)) {
+/// Calls `emit(macroblock row, plane type, slot, bit)` for every bool of
+/// every token of the frame, in order, with the contexts of section 13.3.
+fn walk_tokens(
+    codes: &[MbCode],
+    mbw: usize,
+    mbh: usize,
+    mut emit_row: impl FnMut(usize, usize, Slot, bool),
+) {
     let mut above = vec![[0u8; 9]; mbw];
     for mby in 0..mbh {
+        let mut emit = |t: usize, s: Slot, b: bool| emit_row(mby, t, s, b);
         let mut left = [0u8; 9];
         for (mbx, a) in above.iter_mut().enumerate() {
             let code = &codes[mby * mbw + mbx];

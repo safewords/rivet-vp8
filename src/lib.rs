@@ -13,8 +13,10 @@
 //!   probability persistence, and any frame size. It is bit-exact on the
 //!   VP8 comprehensive test vectors.
 //! - [`Encoder`] writes key frames (16x16 and 4x4 intra modes chosen by
-//!   rate-distortion cost) and inter frames (whole-pixel motion search
-//!   against the last frame), at a fixed quantiser.
+//!   rate-distortion cost) and inter frames (a motion search down to
+//!   quarter samples against the last frame), at a fixed quantiser, with
+//!   token probabilities re-estimated per frame and 1 to 8 token
+//!   partitions.
 //! - [`ivf`] reads and writes the IVF container.
 //!
 //! Pictures in and out are [`Frame`]s: 8-bit 4:2:0 planar, the planes

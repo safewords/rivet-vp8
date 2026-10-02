@@ -132,6 +132,28 @@ fn inter_frames_track_motion() {
 }
 
 #[test]
+fn token_partitions() {
+    for np in [2u8, 4, 8] {
+        let cfg = Config {
+            width: 80,
+            height: 160,
+            token_partitions: np,
+            keyframe_interval: 3,
+            ..Default::default()
+        };
+        let (p, _) = round_trip(cfg, 4);
+        assert!(p.iter().all(|&x| x > 35.0), "{np} partitions: {p:?}");
+    }
+    let bad = Config {
+        width: 16,
+        height: 16,
+        token_partitions: 3,
+        ..Default::default()
+    };
+    assert!(Encoder::new(bad).is_err());
+}
+
+#[test]
 fn odd_sizes() {
     for (w, h) in [(1, 1), (17, 9), (33, 47), (100, 3)] {
         let cfg = Config {
