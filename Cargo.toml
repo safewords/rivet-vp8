@@ -12,7 +12,7 @@ authors = ["Ely Erin Fox"]
 description = "A VP8 decoder and encoder in Rust, written from RFC 6386: no C, no system libraries, no build script. Every feature of the bitstream decodes (bit-exact on the comprehensive test vectors); the encoder writes key frames and motion-searched inter frames at a fixed quantiser. IVF in and out. rivet's VP8 codec. Imported as `vp8`."
 keywords = ["vp8", "video", "decoder", "encoder", "codec"]
 categories = ["multimedia::video", "multimedia::encoding"]
-exclude = [".github/", "tools/"]
+exclude = [".github/", "docs/", "tools/"]
 
 [lib]
 name = "vp8"
