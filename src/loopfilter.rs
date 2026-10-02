@@ -197,10 +197,15 @@ mod tests {
 
     #[test]
     fn simple_filter_rounding() {
-        // p1 p0 | q0 q1 = 100 100 | 104 104: a = c(0 + 12) = 12,
-        // b = (12 + 3) >> 3 = 1, a = (12 + 4) >> 3 = 2.
+        // p1 p0 | q0 q1 = 100 100 | 104 104: a = c(c(p1 - q1) + 3 (q0 - p0))
+        // = -4 + 12 = 8, b = (8 + 3) >> 3 = 1, a = (8 + 4) >> 3 = 1.
         let mut row = [100, 100, 104, 104];
         simple_edge(&mut row, 2, 1, 4, 1, 40);
-        assert_eq!(row, [100, 101, 102, 104]);
+        assert_eq!(row, [100, 101, 103, 104]);
+        // When (a + 3) >> 3 and (a + 4) >> 3 differ, p0 moves one less
+        // than q0: 100 100 | 106 106 gives a = 18 - 6 = 12, b = 1, a = 2.
+        let mut row = [100, 100, 106, 106];
+        simple_edge(&mut row, 2, 1, 4, 1, 40);
+        assert_eq!(row, [100, 101, 104, 106]);
     }
 }
