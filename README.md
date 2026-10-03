@@ -1,6 +1,6 @@
 # rivet-vp8
 
-[![CI](https://github.com/rivet-transcoder/rivet-vp8/actions/workflows/ci.yml/badge.svg)](https://github.com/rivet-transcoder/rivet-vp8/actions/workflows/ci.yml)
+[![CI](https://github.com/safewords/rivet-vp8/actions/workflows/ci.yml/badge.svg)](https://github.com/safewords/rivet-vp8/actions/workflows/ci.yml)
 
 A **VP8** decoder and encoder in Rust: no C, no system libraries, no build
 script, nothing to install on a build host. Written from RFC 6386 — its
@@ -9,7 +9,7 @@ not translated from any other implementation. The decoder is **bit-exact**
 on all eighteen VP8 comprehensive test vectors, every frame (the figures are
 [below](#how-it-is-checked)).
 
-Written for the **[rivet](https://github.com/rivet-transcoder/rivet)**
+Written for the **[rivet](https://github.com/safewords/rivet)**
 transcoder, where it is the VP8 codec on both sides: the decoder for VP8 in
 WebM / Matroska / IVF sources, and the encoder behind VP8 output. Usable on
 its own by anything that has VP8 frames and wants planar pictures back, or
@@ -20,7 +20,7 @@ dependency (`thiserror`), no features, no build script.
 
 ```toml
 [dependencies]
-vp8 = { package = "rivet-vp8", git = "https://github.com/rivet-transcoder/rivet-vp8", branch = "develop" }
+vp8 = { package = "rivet-vp8", git = "https://github.com/safewords/rivet-vp8", branch = "develop" }
 ```
 
 ## What it decodes

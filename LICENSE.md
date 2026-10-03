@@ -255,7 +255,7 @@ You do not accept this License, You have no rights to the Software.
 ## EXHIBIT A — Attribution Information (fill in; this is what §5 requires)
 
 - **Attribution credit text** (REQUIRED; max 12 words): e.g. `Video encoding powered by Rivet`
-- **Attribution URL** (OPTIONAL): e.g. `https://github.com/rivet-transcoder/rivet`
+- **Attribution URL** (OPTIONAL): e.g. `https://github.com/safewords/rivet`
 - **Attribution graphic** (OPTIONAL; if provided, governed by §7): `[ none / path-to-logo ]`
 
 ---
