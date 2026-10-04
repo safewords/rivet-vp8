@@ -1,14 +1,16 @@
-//! The VP8 comprehensive test vectors (`vp80-00-comprehensive-001` to
-//! `-018`): each `.ivf` stream must decode to frames whose MD5s match its
-//! `.ivf.md5` list, frame for frame. See `tests/data/README.md` for where
-//! the files come from.
+//! The VP8 test vectors: each `.ivf` stream must decode to frames whose
+//! MD5s match its `.ivf.md5` list, frame for frame. The eighteen
+//! comprehensive vectors (`vp80-00-comprehensive-001` to `-018`) are
+//! committed under `tests/data/` (see its README); the other 44 public
+//! vectors (`vp80-01` to `vp80-06`) are downloaded into `tests/vectors/` by
+//! `tools/fetch-vectors.sh` and checked when present — `VP8_REQUIRE_VECTORS`
+//! makes a missing set a failure.
 
 use std::path::Path;
 
 /// Decodes one vector; returns (frames matching, frames expected) and a
 /// description of the first mismatch.
-fn check(name: &str) -> (usize, usize, Option<String>) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+fn check(dir: &Path, name: &str) -> (usize, usize, Option<String>) {
     let ivf = std::fs::read(dir.join(format!("{name}.ivf"))).unwrap();
     let md5s = std::fs::read_to_string(dir.join(format!("{name}.ivf.md5"))).unwrap();
     let expected: Vec<&str> = md5s
@@ -56,7 +58,8 @@ fn comprehensive_vectors() {
     let mut total = (0, 0);
     for i in 1..=18 {
         let name = format!("vp80-00-comprehensive-{i:03}");
-        let (ok, n, bad) = check(&name);
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+        let (ok, n, bad) = check(&dir, &name);
         total.0 += ok;
         total.1 += n;
         println!(
@@ -74,6 +77,48 @@ fn comprehensive_vectors() {
         total.0,
         total.1,
         18 - failures.len()
+    );
+    assert!(failures.is_empty(), "vectors not bit-exact: {failures:?}");
+}
+
+#[test]
+fn downloaded_vectors() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+    let list = include_str!("../tools/vectors.txt");
+    let names: Vec<&str> = list
+        .lines()
+        .map(|l| l.trim().trim_end_matches(".ivf"))
+        .filter(|l| !l.is_empty())
+        .collect();
+    if !dir.join(format!("{}.ivf", names[0])).exists() {
+        assert!(
+            std::env::var_os("VP8_REQUIRE_VECTORS").is_none(),
+            "tests/vectors is empty: run tools/fetch-vectors.sh"
+        );
+        println!("tests/vectors is empty (tools/fetch-vectors.sh downloads it): skipped");
+        return;
+    }
+    let mut failures = Vec::new();
+    let mut total = (0, 0);
+    for name in &names {
+        let (ok, n, bad) = check(&dir, name);
+        total.0 += ok;
+        total.1 += n;
+        if ok != n || bad.is_some() {
+            println!(
+                "{name}: {ok}/{n} frames{}",
+                bad.map(|b| format!(", first mismatch at {b}"))
+                    .unwrap_or_default()
+            );
+            failures.push(name.to_string());
+        }
+    }
+    println!(
+        "total: {}/{} frames; {} of {} vectors bit-exact",
+        total.0,
+        total.1,
+        names.len() - failures.len(),
+        names.len()
     );
     assert!(failures.is_empty(), "vectors not bit-exact: {failures:?}");
 }
