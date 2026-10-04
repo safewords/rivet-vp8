@@ -153,6 +153,42 @@ fn token_partitions() {
     assert!(Encoder::new(bad).is_err());
 }
 
+/// The encoder decides every macroblock the same on any number of
+/// threads, and the decoder reconstructs the same pictures.
+#[test]
+fn threads_do_not_change_the_output() {
+    for (w, h, np, interval) in [(160, 96, 1u8, 3u32), (96, 128, 4, 0), (33, 47, 2, 2)] {
+        let cfg = |threads| Config {
+            width: w,
+            height: h,
+            quantizer: 30,
+            keyframe_interval: interval,
+            token_partitions: np,
+            threads,
+            ..Default::default()
+        };
+        let mut one = Encoder::new(cfg(1)).unwrap();
+        let mut four = Encoder::new(cfg(4)).unwrap();
+        let mut d1 = Decoder::new();
+        let mut d3 = Decoder::with_threads(3);
+        for t in 0..6 {
+            let src = picture(w, h, t);
+            let a = one.encode(&src).unwrap();
+            let b = four.encode(&src).unwrap();
+            assert_eq!(a, b, "{w}x{h} frame {t}: 1 and 4 encoder threads differ");
+            let p1 = d1.decode(&a).unwrap().unwrap();
+            let p3 = d3.decode(&a).unwrap().unwrap();
+            assert_eq!(p1, p3, "{w}x{h} frame {t}: 1 and 3 decoder threads differ");
+            assert_eq!(p1, one.reconstruction().unwrap());
+            assert_eq!(p3, four.reconstruction().unwrap());
+        }
+    }
+    let mut d = Decoder::with_threads(0);
+    assert!(d.threads() >= 1);
+    d.set_threads(2);
+    assert_eq!(d.threads(), 2);
+}
+
 #[test]
 fn odd_sizes() {
     for (w, h) in [(1, 1), (17, 9), (33, 47), (100, 3)] {

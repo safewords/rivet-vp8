@@ -8,9 +8,22 @@
 
 use std::path::Path;
 
-/// Decodes one vector; returns (frames matching, frames expected) and a
-/// description of the first mismatch.
+/// Decodes one vector on 1 and on 3 threads; returns (frames matching,
+/// frames expected) and a description of the first mismatch.
 fn check(dir: &Path, name: &str) -> (usize, usize, Option<String>) {
+    let one = check_threads(dir, name, 1);
+    let three = check_threads(dir, name, 3);
+    if three.2.is_some() && one.2.is_none() {
+        return (
+            three.0,
+            three.1,
+            three.2.map(|b| format!("{b} (3 threads)")),
+        );
+    }
+    one
+}
+
+fn check_threads(dir: &Path, name: &str, threads: usize) -> (usize, usize, Option<String>) {
     let ivf = std::fs::read(dir.join(format!("{name}.ivf"))).unwrap();
     let md5s = std::fs::read_to_string(dir.join(format!("{name}.ivf.md5"))).unwrap();
     let expected: Vec<&str> = md5s
@@ -19,7 +32,7 @@ fn check(dir: &Path, name: &str) -> (usize, usize, Option<String>) {
         .collect();
 
     let mut reader = vp8::ivf::IvfReader::new(&ivf[..]).unwrap();
-    let mut dec = vp8::Decoder::new();
+    let mut dec = vp8::Decoder::with_threads(threads);
     let mut shown = 0;
     let mut matched = 0;
     let mut first_bad = None;

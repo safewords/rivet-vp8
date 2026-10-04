@@ -267,6 +267,48 @@ pub(crate) fn tree_path(
     walk(tree, start, value, 0, path)
 }
 
+/// Every leaf's path through a tree from one start node, found once: the
+/// encoder codes and prices tree values far too often to search the tree
+/// each time.
+pub(crate) struct TreePaths {
+    /// For each leaf value: the number of steps, then (node, bit) pairs.
+    paths: [(u8, [(u8, bool); 12]); 16],
+}
+
+impl TreePaths {
+    pub(crate) fn new(tree: &Tree, start: usize) -> TreePaths {
+        let mut paths = [(0u8, [(0u8, false); 12]); 16];
+        for (v, slot) in paths.iter_mut().enumerate() {
+            let mut path = [(0usize, false); 16];
+            if let Some(n) = tree_path(tree, start, v as u8, &mut path) {
+                slot.0 = n as u8;
+                for (d, &(node, bit)) in slot.1.iter_mut().zip(&path[..n]) {
+                    *d = (node as u8, bit);
+                }
+            }
+        }
+        TreePaths { paths }
+    }
+
+    /// The (node, bit) steps to leaf `value`.
+    #[inline]
+    pub(crate) fn path(&self, value: u8) -> &[(u8, bool)] {
+        let (n, p) = &self.paths[value as usize];
+        debug_assert!(*n > 0, "{value} is not a leaf");
+        &p[..*n as usize]
+    }
+
+    /// The cost of leaf `value` at `probs`, in 1/256 bits; the same as
+    /// [`tree_cost`].
+    #[inline]
+    pub(crate) fn cost(&self, probs: &[u8], value: u8) -> u32 {
+        self.path(value)
+            .iter()
+            .map(|&(node, bit)| cost(probs[node as usize >> 1], bit))
+            .sum()
+    }
+}
+
 /// Cost in 1/256 bits of coding `bit` at `prob`, for the encoder's choices.
 pub(crate) fn cost(prob: u8, bit: bool) -> u32 {
     let p = if bit { 256 - prob as u32 } else { prob as u32 };
@@ -284,6 +326,7 @@ static COST_TABLE: std::sync::LazyLock<[u16; 257]> = std::sync::LazyLock::new(||
 });
 
 /// Cost of coding `value` in `tree` from `start`, in 1/256 bits.
+#[cfg(test)]
 pub(crate) fn tree_cost(tree: &Tree, probs: &[u8], start: usize, value: u8) -> u32 {
     let mut path = [(0usize, false); 16];
     let n = tree_path(tree, start, value, &mut path).expect("value is a leaf of the tree");
@@ -417,6 +460,34 @@ mod tests {
         let mut d = BoolDecoder::new(&data);
         for (i, &b) in bits.iter().enumerate() {
             assert_eq!(d.read(1), b, "bool {i}");
+        }
+    }
+
+    #[test]
+    fn tree_paths_match_the_search() {
+        use crate::tables::*;
+        for (tree, start) in [
+            (&COEFF_TREE[..], 0),
+            (&COEFF_TREE[..], 2),
+            (&BMODE_TREE[..], 0),
+            (&MV_REF_TREE[..], 0),
+            (&SMALL_MV_TREE[..], 0),
+            (&YMODE_TREE[..], 0),
+        ] {
+            let paths = TreePaths::new(tree, start);
+            let probs: Vec<u8> = (0..tree.len()).map(|i| (37 * i + 11) as u8 | 1).collect();
+            for v in 0..16u8 {
+                let mut p = [(0usize, false); 16];
+                if let Some(n) = tree_path(tree, start, v, &mut p) {
+                    let got: Vec<(usize, bool)> = paths
+                        .path(v)
+                        .iter()
+                        .map(|&(a, b)| (a as usize, b))
+                        .collect();
+                    assert_eq!(got, p[..n].to_vec());
+                    assert_eq!(paths.cost(&probs, v), tree_cost(tree, &probs, start, v));
+                }
+            }
         }
     }
 

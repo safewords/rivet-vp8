@@ -6,10 +6,16 @@
 use crate::boolcoder::BoolDecoder;
 use crate::error::{Result, bitstream, unsupported};
 use crate::frame::Frame;
-use crate::loopfilter::{self, Params};
-use crate::predict::{Edge, RefPlane, predict_block, predict_inter, predict_subblock};
+use crate::loopfilter::Params;
+use crate::pool::{Padded, PanicGuard, Pool, wait};
+use crate::predict::{RefPlane, predict_inter};
+use crate::recon::{
+    CHROMA0, CS, LS, LUMA0, MbWork, SharedFrame, filter_mb, filter_params, reconstruct_intra,
+};
 use crate::tables::*;
-use crate::transform::{add_residue, inverse_wht};
+use crate::transform::inverse_wht;
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// A motion vector in quarter samples of luma, as coded (section 17.1).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -200,7 +206,7 @@ pub(crate) struct FrameBuf {
 }
 
 impl FrameBuf {
-    fn new(mbw: usize, mbh: usize) -> Self {
+    pub(crate) fn new(mbw: usize, mbh: usize) -> Self {
         FrameBuf {
             planes: [
                 PlaneBuf::new(mbw * 16, mbh * 16),
@@ -291,6 +297,8 @@ pub struct Decoder {
     scaling: (u8, u8),
     /// The header of the last frame decoded (for the header dump test).
     pub(crate) last_header: Header,
+    /// The threads frames are decoded on (none but the caller's for 1).
+    pool: Pool,
 }
 
 impl Default for Decoder {
@@ -333,7 +341,44 @@ impl Decoder {
             have_key_frame: false,
             scaling: (0, 0),
             last_header: Header::default(),
+            pool: Pool::new(1),
         }
+    }
+
+    /// A decoder that decodes each frame on up to `threads` threads, the
+    /// caller's included; 0 means one per CPU, 1 decodes on the caller's
+    /// thread alone. The output is the same whatever the count.
+    ///
+    /// Rows of macroblocks are reconstructed and loop filtered in a
+    /// wavefront; a frame's rows decode in parallel as far as its token
+    /// partitions allow (row `r` reads partition `r` mod the count), and the
+    /// loop filter runs alongside reconstruction even with one partition.
+    pub fn with_threads(threads: usize) -> Self {
+        let mut d = Self::new();
+        d.set_threads(threads);
+        d
+    }
+
+    /// Sets the thread count (see [`Self::with_threads`]).
+    pub fn set_threads(&mut self, threads: usize) {
+        let threads = if threads == 0 {
+            std::thread::available_parallelism().map_or(1, |n| n.get())
+        } else {
+            threads
+        };
+        if threads != self.pool.threads() {
+            self.pool = Pool::new(threads);
+        }
+    }
+
+    /// The thread count frames are decoded with.
+    pub fn threads(&self) -> usize {
+        self.pool.threads()
+    }
+
+    /// The decoder's threads (the encoder decides macroblocks on them too).
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.pool
     }
 
     /// The probabilities in force for the next frame (the encoder codes
@@ -499,11 +544,11 @@ impl Decoder {
 
     /// Sets up the token partitions (section 9.5) and decodes the
     /// macroblocks into a free buffer; returns its index.
-    fn decode_partitions(
+    fn decode_partitions<'d>(
         &mut self,
         hdr: &Header,
-        bd: &mut BoolDecoder,
-        rest: &[u8],
+        bd: &mut BoolDecoder<'d>,
+        rest: &'d [u8],
     ) -> Result<usize> {
         let np = hdr.partitions;
         let sizes_len = 3 * (np - 1);
@@ -535,7 +580,7 @@ impl Decoder {
             .find(|&i| i != self.last && i != self.golden && i != self.altref)
             .expect("four buffers, three references");
         let mut frame = std::mem::take(&mut self.bufs[cur]);
-        let result = self.decode_macroblocks(hdr, bd, &mut parts, &mut frame);
+        let result = self.decode_macroblocks(hdr, bd, parts, &mut frame);
         self.bufs[cur] = frame;
         result.map(|()| cur)
     }
@@ -682,13 +727,15 @@ impl Decoder {
         Ok((!hdr.refresh_entropy).then_some(before))
     }
 
-    /// Decodes every macroblock of the frame into `frame`, then runs the
-    /// loop filter over it.
-    fn decode_macroblocks(
+    /// Decodes every macroblock of the frame into `frame`: first the modes
+    /// and vectors of all of them (the first partition), then the residue,
+    /// reconstruction and loop filter, a row at a time, on up to
+    /// [`Self::threads`] threads (see `Schedule`).
+    fn decode_macroblocks<'d>(
         &mut self,
         hdr: &Header,
-        bd: &mut BoolDecoder,
-        parts: &mut [BoolDecoder],
+        bd: &mut BoolDecoder<'d>,
+        parts: Vec<BoolDecoder<'d>>,
         frame: &mut FrameBuf,
     ) -> Result<()> {
         let (mbw, mbh) = (self.mbw, self.mbh);
@@ -716,102 +763,120 @@ impl Decoder {
             }
             dq[s] = Dequant::new(&hdr.quant, q.clamp(0, 127));
         }
-        let filters = if hdr.version == 0 {
-            &SIXTAP_FILTERS
-        } else {
-            &BILINEAR_FILTERS
+
+        let Decoder {
+            probs,
+            seg,
+            seg_map,
+            mbs,
+            bufs,
+            sign_bias,
+            lf_deltas,
+            last,
+            golden,
+            altref,
+            pool,
+            ..
+        } = self;
+        let ctx = FrameCtx {
+            mbw,
+            mbh,
+            dq: &dq,
+            coeff_probs: &probs.coeff,
+            refs: [&bufs[*last], &bufs[*golden], &bufs[*altref]],
+            filters: if hdr.version == 0 {
+                &SIXTAP_FILTERS
+            } else {
+                &BILINEAR_FILTERS
+            },
+            full_pixel: hdr.version == 3,
+            params: filter_params(hdr.sharpness, hdr.key_frame),
+            simple: hdr.simple_filter,
+            filter: hdr.filter_level != 0,
         };
-        let full_pixel = hdr.version == 3;
-
-        let stride = mbw + 1;
-        let mut above_nz = vec![[0u8; 9]; mbw];
-        let mut lf = vec![(0u8, false); mbw * mbh];
-        let mut coeffs = Coeffs {
-            blocks: [[0; 16]; 25],
-            nonzero: [false; 25],
+        let modes = ModeJob {
+            reader: ModeReader {
+                seg,
+                seg_map,
+                mbs,
+                probs,
+                sign_bias: *sign_bias,
+                mbw,
+                mbh,
+            },
+            bd,
+            hdr,
+            seg_level,
+            lf_deltas,
         };
-        let np = parts.len();
-        for mby in 0..mbh {
-            let mut left_nz = [0u8; 9];
-            for mbx in 0..mbw {
-                let idx = (mby + 1) * stride + mbx + 1;
-                let info = self.read_mb_header(bd, hdr, mbx, mby);
-                self.mbs[idx] = info;
-
-                coeffs.blocks = [[0; 16]; 25];
-                coeffs.nonzero = [false; 25];
-                let has_y2 = info.ymode != B_PRED && info.ymode != SPLITMV;
-                let coded = if info.skip {
-                    // No coefficients: the blocks' contexts become empty;
-                    // a macroblock without Y2 leaves the Y2 context alone.
-                    let (keep_left, keep_above) = (left_nz[8], above_nz[mbx][8]);
-                    left_nz = [0; 9];
-                    above_nz[mbx] = [0; 9];
-                    if !has_y2 {
-                        left_nz[8] = keep_left;
-                        above_nz[mbx][8] = keep_above;
-                    }
-                    false
-                } else {
-                    let part = &mut parts[mby % np];
-                    read_residual(
-                        part,
-                        &self.probs.coeff,
-                        has_y2,
-                        &dq[info.segment as usize],
-                        &mut above_nz[mbx],
-                        &mut left_nz,
-                        &mut coeffs,
-                    )
-                };
-                if has_y2 && coeffs.nonzero[24] {
-                    let dc = inverse_wht(&coeffs.blocks[24]);
-                    for (b, &d) in dc.iter().enumerate() {
-                        coeffs.blocks[b][0] = d;
-                    }
-                }
-
-                if info.ref_frame == INTRA {
-                    reconstruct_intra(frame, &info, mbx, mby, mbw, &coeffs);
-                } else {
-                    let r = match info.ref_frame {
-                        LAST => self.last,
-                        GOLDEN => self.golden,
-                        _ => self.altref,
-                    };
-                    reconstruct_inter(
-                        frame,
-                        &self.bufs[r],
-                        &info,
-                        mbx,
-                        mby,
-                        &coeffs,
-                        filters,
-                        full_pixel,
-                    );
-                }
-
-                // Section 15: no filtering at all when the frame's level is
-                // 0, whatever the deltas would add; otherwise a macroblock
-                // is skipped when its final level (segment, then deltas) is
-                // 0. (A segment level of 0 raised by the deltas is filtered:
-                // vector 013 has such macroblocks.)
-                let base = seg_level[info.segment as usize];
-                let level = if hdr.filter_level == 0 {
-                    0
-                } else {
-                    self.lf_deltas.apply(base, info.ref_frame, info.ymode)
-                };
-                lf[mby * mbw + mbx] = (level as u8, !has_y2 || coded);
-            }
-        }
+        let shared = SharedFrame::new(frame);
+        let schedule = Schedule::new(&ctx, modes, parts);
+        schedule.run(&ctx, &shared, pool);
+        drop(schedule);
         if bd.overran() {
             return Err(bitstream("first partition ends before the last macroblock"));
         }
-        loop_filter(frame, &lf, mbw, mbh, hdr);
         Ok(())
     }
+}
 
+/// What reading a macroblock's modes needs of the decoder's state.
+struct ModeReader<'a> {
+    seg: &'a Segmentation,
+    seg_map: &'a mut [u8],
+    /// Macroblock info with a one-macroblock border above and to the left
+    /// (stride `mbw + 1`).
+    mbs: &'a mut [MbInfo],
+    probs: &'a Probs,
+    sign_bias: [bool; 4],
+    mbw: usize,
+    mbh: usize,
+}
+
+/// The modes and loop filter levels of one row of macroblocks.
+struct RowModes {
+    infos: Vec<MbInfo>,
+    levels: Vec<u8>,
+}
+
+/// The job that reads every macroblock's modes from the first partition.
+struct ModeJob<'a, 'd> {
+    reader: ModeReader<'a>,
+    bd: &'a mut BoolDecoder<'d>,
+    hdr: &'a Header,
+    seg_level: [i32; 4],
+    lf_deltas: &'a LfDeltas,
+}
+
+impl ModeJob<'_, '_> {
+    /// Reads row `mby`.
+    fn row(&mut self, mby: usize) -> RowModes {
+        let (mbw, hdr) = (self.reader.mbw, self.hdr);
+        let stride = mbw + 1;
+        let mut infos = Vec::with_capacity(mbw);
+        let mut levels = Vec::with_capacity(mbw);
+        for mbx in 0..mbw {
+            let info = self.reader.read_mb_header(self.bd, hdr, mbx, mby);
+            self.reader.mbs[(mby + 1) * stride + mbx + 1] = info;
+            // Section 15: no filtering at all when the frame's level is 0,
+            // whatever the deltas would add; otherwise a macroblock is
+            // skipped when its final level (segment, then deltas) is 0. (A
+            // segment level of 0 raised by the deltas is filtered: vector
+            // 013 has such macroblocks.)
+            let base = self.seg_level[info.segment as usize];
+            let level = if hdr.filter_level == 0 {
+                0
+            } else {
+                self.lf_deltas.apply(base, info.ref_frame, info.ymode)
+            };
+            infos.push(info);
+            levels.push(level as u8);
+        }
+        RowModes { infos, levels }
+    }
+}
+
+impl ModeReader<'_> {
     /// The macroblock header: segment, skip flag, modes and vectors
     /// (sections 10, 11, 16, 17; layout in section 19.3).
     fn read_mb_header(
@@ -883,7 +948,7 @@ impl Decoder {
         } else {
             ALTREF
         };
-        let near = find_near_mvs(&self.mbs, idx, stride, info.ref_frame, &self.sign_bias);
+        let near = find_near_mvs(self.mbs, idx, stride, info.ref_frame, &self.sign_bias);
         let probs: [u8; 4] = std::array::from_fn(|i| MODE_CONTEXTS[near.cnt[i] as usize][i]);
         info.ymode = bd.tree(&MV_REF_TREE, &probs, 0);
         let (mbw, mbh) = (self.mbw, self.mbh);
@@ -1143,6 +1208,11 @@ fn read_residual(
 /// One block's tokens (sections 13.2-13.3), dequantised with `dq` (DC, AC)
 /// into `out` in raster order. Returns (any non-zero coefficient, any token
 /// coded before the end of block).
+///
+/// The token tree of section 13.2 is walked as nested branches rather than
+/// through its array form (`COEFF_TREE`): node `2k` reads probability `k`;
+/// `tests::token_walk_matches_the_tree` checks the two agree.
+#[inline]
 fn read_block(
     bd: &mut BoolDecoder,
     probs: &[[[u8; 11]; 3]; 8],
@@ -1153,27 +1223,41 @@ fn read_block(
 ) -> (bool, bool) {
     let mut i = first;
     let mut ctx = ctx;
-    // After a zero the end-of-block branch is skipped (it cannot follow).
-    let mut start = 0;
     let mut nonzero = false;
     let mut coded = false;
+    // After a zero the end-of-block branch is skipped (it cannot follow).
+    let mut after_zero = false;
     while i < 16 {
         let p = &probs[COEFF_BANDS[i]][ctx];
-        let token = bd.tree(&COEFF_TREE, p, start);
-        if token == DCT_EOB {
-            break;
+        if !after_zero && !bd.read(p[0]) {
+            break; // DCT_EOB
         }
         coded = true;
-        if token == 0 {
+        if !bd.read(p[1]) {
+            // DCT_0
             ctx = 0;
-            start = 2;
+            after_zero = true;
             i += 1;
             continue;
         }
-        let v = if token < DCT_CAT1 {
-            token as i32
+        let v = if !bd.read(p[2]) {
+            1
+        } else if !bd.read(p[3]) {
+            if !bd.read(p[4]) {
+                2
+            } else if !bd.read(p[5]) {
+                3
+            } else {
+                4
+            }
         } else {
-            let cat = (token - DCT_CAT1) as usize;
+            let cat = if !bd.read(p[6]) {
+                bd.read(p[7]) as usize
+            } else if !bd.read(p[8]) {
+                2 + bd.read(p[9]) as usize
+            } else {
+                4 + bd.read(p[10]) as usize
+            };
             let mut extra = 0;
             for &p in PCAT[cat] {
                 extra = (extra << 1) | bd.read(p) as i32;
@@ -1185,136 +1269,10 @@ fn read_block(
         // Section 14.1: products are stored as 16-bit signed integers.
         out[ZIGZAG[i]] = (v * dq[(i > 0) as usize]) as i16;
         nonzero = true;
-        start = 0;
+        after_zero = false;
         i += 1;
     }
     (nonzero, coded)
-}
-
-/// Pixels for intra prediction at (`x`, `y`) of a plane: the frame's
-/// pixel, or 127 above the frame and 129 left of it (section 12).
-#[inline]
-fn edge_px(p: &PlaneBuf, x: isize, y: isize) -> u8 {
-    if y < 0 {
-        127
-    } else if x < 0 {
-        129
-    } else {
-        p.data[y as usize * p.width + x as usize]
-    }
-}
-
-/// Intra prediction and residue for one macroblock (sections 12, 14).
-pub(crate) fn reconstruct_intra(
-    frame: &mut FrameBuf,
-    info: &MbInfo,
-    mbx: usize,
-    mby: usize,
-    mbw: usize,
-    c: &Coeffs,
-) {
-    let p = &mut frame.planes[0];
-    let stride = p.width;
-    let (x0, y0) = (mbx * 16, mby * 16);
-    if info.ymode == B_PRED {
-        for b in 0..16 {
-            let (above, left, top_left) = subblock_edge(p, mbx, mby, mbw, b);
-            let e = Edge {
-                above: &above,
-                left: &left,
-                top_left,
-                have_above: true,
-                have_left: true,
-            };
-            let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
-            predict_subblock(&mut p.data, off, stride, info.bmodes[b], &e);
-            add_residue(&c.blocks[b], &mut p.data, off, stride);
-        }
-    } else {
-        predict_whole(p, x0, y0, 16, info.ymode);
-        for b in 0..16 {
-            let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
-            add_residue(&c.blocks[b], &mut p.data, off, stride);
-        }
-    }
-    for (pi, base) in [(1, 16), (2, 20)] {
-        let p = &mut frame.planes[pi];
-        let stride = p.width;
-        let (x0, y0) = (mbx * 8, mby * 8);
-        predict_whole(p, x0, y0, 8, info.uvmode);
-        for b in 0..4 {
-            let off = (y0 + 4 * (b >> 1)) * stride + x0 + 4 * (b & 1);
-            add_residue(&c.blocks[base + b], &mut p.data, off, stride);
-        }
-    }
-}
-
-/// The edge of luma subblock `b` of the macroblock at (`mbx`, `mby`):
-/// the 4 pixels above and the 4 above-right, the 4 to the left, and the
-/// one above-left (section 12.3). Subblocks of the right column take
-/// their above-right pixels from the row above the macroblock — the
-/// pixels to their right are not decoded yet — and the last macroblock of
-/// a row repeats that row's last pixel; the top row of the frame uses 127.
-pub(crate) fn subblock_edge(
-    p: &PlaneBuf,
-    mbx: usize,
-    mby: usize,
-    mbw: usize,
-    b: usize,
-) -> ([u8; 8], [u8; 4], u8) {
-    let stride = p.width;
-    let (x0, y0) = (mbx * 16, mby * 16);
-    let (bx, by) = (b & 3, b >> 2);
-    let (x, y) = (x0 + 4 * bx, y0 + 4 * by);
-    let mut above = [127u8; 8];
-    if y > 0 {
-        above[..4].copy_from_slice(&p.data[(y - 1) * stride + x..][..4]);
-    }
-    if bx == 3 {
-        if mby > 0 {
-            if mbx + 1 < mbw {
-                above[4..].copy_from_slice(&p.data[(y0 - 1) * stride + x0 + 16..][..4]);
-            } else {
-                above[4..].fill(p.data[(y0 - 1) * stride + x0 + 15]);
-            }
-        }
-    } else if y > 0 {
-        above[4..].copy_from_slice(&p.data[(y - 1) * stride + x + 4..][..4]);
-    }
-    let left: [u8; 4] = std::array::from_fn(|r| edge_px(p, x as isize - 1, (y + r) as isize));
-    let top_left = edge_px(p, x as isize - 1, y as isize - 1);
-    (above, left, top_left)
-}
-
-/// The edge of the `n`x`n` block at (`x0`, `y0`) for the whole-block intra
-/// modes: the row above, the column to the left, the pixel above-left
-/// (section 12.2).
-pub(crate) fn whole_edge(p: &PlaneBuf, x0: usize, y0: usize, n: usize) -> ([u8; 16], [u8; 16], u8) {
-    let mut above = [127u8; 16];
-    let mut left = [129u8; 16];
-    if y0 > 0 {
-        above[..n].copy_from_slice(&p.data[(y0 - 1) * p.width + x0..][..n]);
-    }
-    if x0 > 0 {
-        for (r, l) in left[..n].iter_mut().enumerate() {
-            *l = p.data[(y0 + r) * p.width + x0 - 1];
-        }
-    }
-    (above, left, edge_px(p, x0 as isize - 1, y0 as isize - 1))
-}
-
-/// A whole-block intra mode over the `n`x`n` block at (`x0`, `y0`).
-fn predict_whole(p: &mut PlaneBuf, x0: usize, y0: usize, n: usize, mode: u8) {
-    let (above, left, top_left) = whole_edge(p, x0, y0, n);
-    let e = Edge {
-        above: &above,
-        left: &left,
-        top_left,
-        have_above: y0 > 0,
-        have_left: x0 > 0,
-    };
-    let stride = p.width;
-    predict_block(&mut p.data, y0 * stride + x0, stride, n, mode, &e);
 }
 
 /// The chroma vectors of a macroblock: for each chroma subblock, the
@@ -1343,21 +1301,21 @@ pub(crate) fn chroma_mvs(info: &MbInfo, full_pixel: bool) -> [(i32, i32); 4] {
     })
 }
 
-/// Inter prediction and residue for one macroblock (sections 14, 18).
+/// Inter prediction and residue of one macroblock into `w` (sections 14,
+/// 18).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconstruct_inter(
-    frame: &mut FrameBuf,
+    w: &mut MbWork,
     reference: &FrameBuf,
     info: &MbInfo,
     mbx: usize,
     mby: usize,
-    c: &Coeffs,
-    filters: &[[i32; 6]; 8],
+    blocks: &[[i16; 16]; 25],
+    nonzero: &[bool; 25],
+    filters: &'static [[i32; 6]; 8],
     full_pixel: bool,
 ) {
     // Luma vectors are doubled to eighth samples (section 18.1).
-    let p = &mut frame.planes[0];
-    let stride = p.width;
     let (x0, y0) = (mbx * 16, mby * 16);
     let src = reference.planes[0].as_ref();
     if info.ymode == SPLITMV {
@@ -1366,9 +1324,9 @@ pub(crate) fn reconstruct_inter(
             let mv = info.mvs[b];
             predict_inter(
                 src,
-                &mut p.data,
-                y * stride + x,
-                stride,
+                &mut w.luma,
+                MbWork::sub_off(b),
+                LS,
                 x as i32,
                 y as i32,
                 4,
@@ -1382,9 +1340,9 @@ pub(crate) fn reconstruct_inter(
         let mv = info.mv;
         predict_inter(
             src,
-            &mut p.data,
-            y0 * stride + x0,
-            stride,
+            &mut w.luma,
+            LUMA0,
+            LS,
             x0 as i32,
             y0 as i32,
             16,
@@ -1394,119 +1352,309 @@ pub(crate) fn reconstruct_inter(
             filters,
         );
     }
-    for b in 0..16 {
-        let off = (y0 + 4 * (b >> 2)) * stride + x0 + 4 * (b & 3);
-        add_residue(&c.blocks[b], &mut p.data, off, stride);
-    }
 
     let cmv = chroma_mvs(info, full_pixel);
     let (x0, y0) = (mbx * 8, mby * 8);
-    for (pi, base) in [(1, 16), (2, 20)] {
-        let p = &mut frame.planes[pi];
-        let stride = p.width;
+    for pi in 1..3 {
+        let buf = if pi == 1 { &mut w.u } else { &mut w.v };
         let src = reference.planes[pi].as_ref();
         if cmv.iter().all(|&m| m == cmv[0]) {
             let (mx, my) = cmv[0];
             predict_inter(
-                src,
-                &mut p.data,
-                y0 * stride + x0,
-                stride,
-                x0 as i32,
-                y0 as i32,
-                8,
-                8,
-                mx,
-                my,
-                filters,
+                src, buf, CHROMA0, CS, x0 as i32, y0 as i32, 8, 8, mx, my, filters,
             );
         } else {
             for (k, &(mx, my)) in cmv.iter().enumerate() {
                 let (x, y) = (x0 + 4 * (k & 1), y0 + 4 * (k >> 1));
-                predict_inter(
-                    src,
-                    &mut p.data,
-                    y * stride + x,
-                    stride,
-                    x as i32,
-                    y as i32,
-                    4,
-                    4,
-                    mx,
-                    my,
-                    filters,
-                );
+                let off = CHROMA0 + 4 * (k >> 1) * CS + 4 * (k & 1);
+                predict_inter(src, buf, off, CS, x as i32, y as i32, 4, 4, mx, my, filters);
             }
         }
-        for b in 0..4 {
-            let off = (y0 + 4 * (b >> 1)) * stride + x0 + 4 * (b & 1);
-            add_residue(&c.blocks[base + b], &mut p.data, off, stride);
-        }
     }
+    w.add_residues(blocks, nonzero, true);
 }
 
-/// The loop filter over the whole frame (section 15): `lf` holds each
-/// macroblock's level and whether its inner edges are filtered.
-pub(crate) fn loop_filter(
-    frame: &mut FrameBuf,
-    lf: &[(u8, bool)],
+/// What every thread decoding a frame shares (read-only).
+struct FrameCtx<'a> {
     mbw: usize,
     mbh: usize,
-    hdr: &Header,
-) {
-    let mut params = [Params::default(); 64];
-    for (l, p) in params.iter_mut().enumerate().skip(1) {
-        *p = Params::new(l as u8, hdr.sharpness, hdr.key_frame);
-    }
-    let nplanes = if hdr.simple_filter { 1 } else { 3 };
-    for mby in 0..mbh {
-        for mbx in 0..mbw {
-            let (level, inner) = lf[mby * mbw + mbx];
-            if level == 0 {
-                continue;
+    dq: &'a [Dequant; 4],
+    coeff_probs: &'a [[[[u8; 11]; 3]; 8]; 4],
+    /// Last, golden, altref.
+    refs: [&'a FrameBuf; 3],
+    filters: &'static [[i32; 6]; 8],
+    full_pixel: bool,
+    params: [Params; 64],
+    simple: bool,
+    /// Whether the loop filter runs at all.
+    filter: bool,
+}
+
+/// Packs a macroblock's bottom token contexts (section 13.3: four Y
+/// columns, two U, two V, Y2) into 9 bits.
+fn pack_nz(nz: &[u8; 9]) -> u16 {
+    nz.iter()
+        .enumerate()
+        .fold(0, |a, (i, &v)| a | ((v as u16 & 1) << i))
+}
+
+fn unpack_nz(v: u16) -> [u8; 9] {
+    std::array::from_fn(|i| ((v >> i) & 1) as u8)
+}
+
+/// One unit of work: reading every macroblock's modes, the residue and
+/// reconstruction of a row of macroblocks, or the loop filtering of one.
+#[derive(Clone, Copy, Debug)]
+enum Job {
+    Modes,
+    Recon(usize),
+    Filter(usize),
+}
+
+/// How a frame's macroblock rows are spread over threads.
+///
+/// Reading the modes of every macroblock (M), and each row's
+/// reconstruction (R) and loop filtering (F), are jobs; threads take jobs in
+/// a fixed order — M, R0, R1, F0, R2, F1, ... — and within a job wait,
+/// macroblock by macroblock, for the progress of earlier jobs:
+///
+/// - M reads the first partition from start to end, publishing each row's
+///   modes as it finishes them; R(y) starts once row y's are out.
+/// - R(y) at macroblock x reads the unfiltered pixels of macroblocks x - 1
+///   to x + 1 of row y - 1 (intra edges, the above-right four), so it waits
+///   until R(y - 1) has finished x + 1. Its tokens come from partition y mod
+///   P, which row y - P used before it: R(y) starts once R(y - P) is done.
+/// - F(y) at macroblock x changes the pixels of macroblock x, three columns
+///   of x - 1 and three rows of x in row y - 1. It runs after R(y) and
+///   R(y + 1) have read those unfiltered (both have finished x + 1), after
+///   F(y - 1) has finished x + 1 (whose left edge reaches into x's
+///   columns), and after F(y) at x - 1 (the same thread, just before).
+///
+/// Every job waits only on jobs before it in the order, and every job taken
+/// is being run, so the frame always completes; with one thread the order
+/// itself satisfies every wait. The waits are also what keeps the shared
+/// picture race-free (see `recon`): two jobs running at once never touch
+/// the same pixel unless both only read it.
+struct Schedule<'a, 'd> {
+    jobs: Vec<Job>,
+    modes: Mutex<ModeJob<'a, 'd>>,
+    /// Each row's modes, once read.
+    rows: Vec<OnceLock<RowModes>>,
+    parts: Vec<Mutex<BoolDecoder<'d>>>,
+    /// Macroblocks reconstructed, by row.
+    recon: Vec<Padded>,
+    /// Macroblocks loop filtered, by row.
+    filtered: Vec<Padded>,
+    /// Each macroblock's bottom token contexts.
+    nz: Vec<AtomicU16>,
+    /// Whether each macroblock's inner edges are filtered.
+    inner: Vec<AtomicBool>,
+    next: AtomicUsize,
+    /// Set when a thread panics, so that the others stop waiting.
+    poisoned: AtomicBool,
+}
+
+impl<'a, 'd> Schedule<'a, 'd> {
+    fn new(ctx: &FrameCtx, modes: ModeJob<'a, 'd>, parts: Vec<BoolDecoder<'d>>) -> Self {
+        let (mbw, mbh) = (ctx.mbw, ctx.mbh);
+        let mut jobs = Vec::with_capacity(2 * mbh + 1);
+        jobs.push(Job::Modes);
+        for y in 0..mbh {
+            jobs.push(Job::Recon(y));
+            if ctx.filter && y > 0 {
+                jobs.push(Job::Filter(y - 1));
             }
-            let pr = &params[level as usize];
-            for (pi, p) in frame.planes[..nplanes].iter_mut().enumerate() {
-                let n = if pi == 0 { 16 } else { 8 };
-                let s = p.width;
-                let at = mby * n * s + mbx * n;
-                let buf = &mut p.data[..];
-                if hdr.simple_filter {
-                    if mbx > 0 {
-                        loopfilter::simple_edge(buf, at, 1, s, n, pr.mb_limit);
-                    }
-                    if inner {
-                        for x in (4..n).step_by(4) {
-                            loopfilter::simple_edge(buf, at + x, 1, s, n, pr.sub_limit);
-                        }
-                    }
-                    if mby > 0 {
-                        loopfilter::simple_edge(buf, at, s, 1, n, pr.mb_limit);
-                    }
-                    if inner {
-                        for y in (4..n).step_by(4) {
-                            loopfilter::simple_edge(buf, at + y * s, s, 1, n, pr.sub_limit);
-                        }
-                    }
-                } else {
-                    if mbx > 0 {
-                        loopfilter::mb_edge(buf, at, 1, s, n, pr.mb_limit, pr);
-                    }
-                    if inner {
-                        for x in (4..n).step_by(4) {
-                            loopfilter::subblock_edge(buf, at + x, 1, s, n, pr.sub_limit, pr);
-                        }
-                    }
-                    if mby > 0 {
-                        loopfilter::mb_edge(buf, at, s, 1, n, pr.mb_limit, pr);
-                    }
-                    if inner {
-                        for y in (4..n).step_by(4) {
-                            loopfilter::subblock_edge(buf, at + y * s, s, 1, n, pr.sub_limit, pr);
-                        }
-                    }
+        }
+        if ctx.filter {
+            jobs.push(Job::Filter(mbh - 1));
+        }
+        Schedule {
+            jobs,
+            modes: Mutex::new(modes),
+            rows: (0..mbh).map(|_| OnceLock::new()).collect(),
+            parts: parts.into_iter().map(Mutex::new).collect(),
+            recon: (0..mbh).map(|_| Padded(AtomicUsize::new(0))).collect(),
+            filtered: (0..mbh).map(|_| Padded(AtomicUsize::new(0))).collect(),
+            nz: (0..mbw * mbh).map(|_| AtomicU16::new(0)).collect(),
+            inner: (0..mbw * mbh).map(|_| AtomicBool::new(false)).collect(),
+            next: AtomicUsize::new(0),
+            poisoned: AtomicBool::new(false),
+        }
+    }
+
+    /// Runs every job on the pool's threads.
+    fn run(&self, ctx: &FrameCtx, frame: &SharedFrame, pool: &Pool) {
+        // Reconstruction runs on at most as many rows at once as there are
+        // token partitions, the filter on about as many again: more threads
+        // would only wait.
+        let limit = (2 * self.parts.len()).min(ctx.mbh + 1).max(2);
+        if pool.threads() == 1 {
+            self.work(ctx, frame);
+        } else {
+            let active = AtomicUsize::new(0);
+            pool.run(&|| {
+                if active.fetch_add(1, Ordering::Relaxed) < limit {
+                    self.work(ctx, frame);
+                }
+            });
+        }
+    }
+
+    fn work(&self, ctx: &FrameCtx, frame: &SharedFrame) {
+        let _guard = PanicGuard(&self.poisoned);
+        let mut w = MbWork::new();
+        loop {
+            let j = self.next.fetch_add(1, Ordering::Relaxed);
+            match self.jobs.get(j) {
+                Some(&Job::Modes) => self.read_modes(),
+                Some(&Job::Recon(y)) => self.recon_row(ctx, frame, &mut w, y),
+                Some(&Job::Filter(y)) => self.filter_row(ctx, frame, y),
+                None => return,
+            }
+        }
+    }
+
+    /// Waits until `counter` reaches `target`.
+    fn wait(&self, counter: &AtomicUsize, target: usize) {
+        wait(counter, target, &self.poisoned);
+    }
+
+    /// M: every row's modes, in order.
+    fn read_modes(&self) {
+        let mut job = self.modes.lock().unwrap_or_else(|e| e.into_inner());
+        for (y, slot) in self.rows.iter().enumerate() {
+            let row = job.row(y);
+            let _ = slot.set(row);
+        }
+    }
+
+    /// Row `y`'s modes, waiting for M to read them.
+    fn row(&self, y: usize) -> &RowModes {
+        let mut spins = 0u32;
+        loop {
+            if let Some(r) = self.rows[y].get() {
+                return r;
+            }
+            if self.poisoned.load(Ordering::Relaxed) {
+                panic!("another thread decoding this frame panicked");
+            }
+            if spins < 200 {
+                std::hint::spin_loop();
+                spins += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// R(y): the residue, prediction and reconstruction of row `y`.
+    fn recon_row(&self, ctx: &FrameCtx, frame: &SharedFrame, w: &mut MbWork, y: usize) {
+        let (mbw, np) = (ctx.mbw, self.parts.len());
+        if y >= np {
+            self.wait(&self.recon[y - np], mbw);
+        }
+        let mut part = self.parts[y % np].lock().unwrap_or_else(|e| e.into_inner());
+        let mut coeffs = Coeffs {
+            blocks: [[0; 16]; 25],
+            nonzero: [false; 25],
+        };
+        let modes = self.row(y);
+        let mut left_nz = [0u8; 9];
+        for x in 0..mbw {
+            if y > 0 {
+                self.wait(&self.recon[y - 1], (x + 2).min(mbw));
+            }
+            let i = y * mbw + x;
+            let info = &modes.infos[x];
+            let mut above_nz = if y > 0 {
+                unpack_nz(self.nz[i - mbw].load(Ordering::Relaxed))
+            } else {
+                [0; 9]
+            };
+            coeffs.blocks = [[0; 16]; 25];
+            coeffs.nonzero = [false; 25];
+            let has_y2 = info.ymode != B_PRED && info.ymode != SPLITMV;
+            let coded = if info.skip {
+                // No coefficients: the blocks' contexts become empty; a
+                // macroblock without Y2 leaves the Y2 context alone.
+                let (keep_left, keep_above) = (left_nz[8], above_nz[8]);
+                left_nz = [0; 9];
+                above_nz = [0; 9];
+                if !has_y2 {
+                    left_nz[8] = keep_left;
+                    above_nz[8] = keep_above;
+                }
+                false
+            } else {
+                read_residual(
+                    &mut part,
+                    ctx.coeff_probs,
+                    has_y2,
+                    &ctx.dq[info.segment as usize],
+                    &mut above_nz,
+                    &mut left_nz,
+                    &mut coeffs,
+                )
+            };
+            self.nz[i].store(pack_nz(&above_nz), Ordering::Relaxed);
+            if has_y2 && coeffs.nonzero[24] {
+                let dc = inverse_wht(&coeffs.blocks[24]);
+                for (b, &d) in dc.iter().enumerate() {
+                    coeffs.blocks[b][0] = d;
                 }
             }
+            // SAFETY: the edges read are the unfiltered bottom row of
+            // macroblocks x - 1 to x + 1 of row y - 1 (finished: waited for
+            // above) and the right column of x - 1 in this row (finished by
+            // this thread); F jobs leave them alone until this macroblock
+            // and the next are done. The macroblock written is touched by
+            // nobody else until this row's progress counts it.
+            unsafe { w.load_edges(frame, x, y, mbw) };
+            if info.ref_frame == INTRA {
+                reconstruct_intra(w, info, x, y, &coeffs.blocks, &coeffs.nonzero);
+            } else {
+                reconstruct_inter(
+                    w,
+                    ctx.refs[info.ref_frame as usize - 1],
+                    info,
+                    x,
+                    y,
+                    &coeffs.blocks,
+                    &coeffs.nonzero,
+                    ctx.filters,
+                    ctx.full_pixel,
+                );
+            }
+            // SAFETY: as above.
+            unsafe { w.store(frame, x, y) };
+            self.inner[i].store(!has_y2 || coded, Ordering::Relaxed);
+            self.recon[y].store(x + 1, Ordering::Release);
+        }
+    }
+
+    /// F(y): the loop filter over row `y`.
+    fn filter_row(&self, ctx: &FrameCtx, frame: &SharedFrame, y: usize) {
+        let (mbw, mbh) = (ctx.mbw, ctx.mbh);
+        for x in 0..mbw {
+            let ready = (x + 2).min(mbw);
+            self.wait(&self.recon[y], ready);
+            if y + 1 < mbh {
+                self.wait(&self.recon[y + 1], ready);
+            }
+            if y > 0 {
+                self.wait(&self.filtered[y - 1], ready);
+            }
+            let i = y * mbw + x;
+            // Set before R(y) started (waited for above).
+            let level = self.rows[y].get().map_or(0, |r| r.levels[x]);
+            if level != 0 {
+                let inner = self.inner[i].load(Ordering::Relaxed);
+                // SAFETY: the waits above (see Schedule) leave this thread
+                // the only one touching the macroblock, the columns left of
+                // it and the rows above it that the filter reaches.
+                unsafe { filter_mb(frame, x, y, &ctx.params[level as usize], inner, ctx.simple) };
+            }
+            self.filtered[y].store(x + 1, Ordering::Release);
         }
     }
 }
@@ -1632,6 +1780,68 @@ mod tests {
             bias,
         );
         assert_eq!(n.cnt[1], 4);
+    }
+
+    /// The nested-branch token reader against the generic tree walk, on
+    /// random bits at random probabilities.
+    #[test]
+    fn token_walk_matches_the_tree() {
+        let mut seed = 0x5eed_u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for _ in 0..2000 {
+            let data: Vec<u8> = (0..64).map(|_| rnd() as u8).collect();
+            let mut probs = [[[0u8; 11]; 3]; 8];
+            for v in probs.iter_mut().flatten().flatten() {
+                *v = (rnd() % 255 + 1) as u8;
+            }
+            let first = (rnd() % 2) as usize;
+            let ctx = (rnd() % 3) as usize;
+            let mut a = BoolDecoder::new(&data);
+            let mut b = BoolDecoder::new(&data);
+            let mut out_a = [0i16; 16];
+            let got = read_block(&mut a, &probs, first, ctx, &mut out_a, [3, 5]);
+            // The reference: section 13's walk through the array tree.
+            let mut out_b = [0i16; 16];
+            let (mut i, mut c, mut start) = (first, ctx, 0);
+            let (mut nz, mut coded) = (false, false);
+            while i < 16 {
+                let token = b.tree(&COEFF_TREE, &probs[COEFF_BANDS[i]][c], start);
+                if token == DCT_EOB {
+                    break;
+                }
+                coded = true;
+                if token == 0 {
+                    c = 0;
+                    start = 2;
+                    i += 1;
+                    continue;
+                }
+                let v = if token < DCT_CAT1 {
+                    token as i32
+                } else {
+                    let cat = (token - DCT_CAT1) as usize;
+                    let mut extra = 0;
+                    for &p in PCAT[cat] {
+                        extra = (extra << 1) | b.read(p) as i32;
+                    }
+                    CAT_BASE[cat] + extra
+                };
+                c = if v == 1 { 1 } else { 2 };
+                let v = if b.flag() { -v } else { v };
+                out_b[ZIGZAG[i]] = (v * [3, 5][(i > 0) as usize]) as i16;
+                nz = true;
+                start = 0;
+                i += 1;
+            }
+            assert_eq!(got, (nz, coded));
+            assert_eq!(out_a, out_b);
+            assert_eq!(a.read(128), b.read(128), "decoders out of step");
+        }
     }
 
     #[test]

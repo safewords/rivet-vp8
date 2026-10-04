@@ -1,6 +1,7 @@
 //! Intra prediction (RFC 6386 section 12) and inter prediction's subpixel
 //! interpolation (section 18).
 
+use crate::dsp::{SUBPEL_READ, dsp};
 use crate::tables::*;
 
 /// The edge of an intra-predicted block: the row above (`above[..n]`, and
@@ -228,9 +229,10 @@ pub(crate) struct RefPlane<'a> {
     pub height: usize,
 }
 
-/// Predicts a `w`x`h` block at (`x`, `y`) of a plane from `src` displaced
-/// by (`mvx`, `mvy`) in eighths of a sample of that plane (section 18), into
-/// `dst[off..]`. `filters` is the six-tap or the bilinear set.
+/// Predicts a `w`x`h` block (`w` 4, 8 or 16, `h` at most 16) at (`x`,
+/// `y`) of a plane from `src` displaced by (`mvx`, `mvy`) in eighths of a
+/// sample of that plane (section 18), into `dst[off..]`. `filters` is the
+/// six-tap or the bilinear set.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn predict_inter(
     src: RefPlane,
@@ -243,63 +245,85 @@ pub(crate) fn predict_inter(
     h: usize,
     mvx: i32,
     mvy: i32,
-    filters: &[[i32; 6]; 8],
+    filters: &'static [[i32; 6]; 8],
 ) {
+    assert!(matches!(w, 4 | 8 | 16) && h <= 16 && h > 0);
+    assert!(off + (h - 1) * stride + w <= dst.len());
     let ix = x + (mvx >> 3);
     let iy = y + (mvy >> 3);
     let fx = (mvx & 7) as usize;
     let fy = (mvy & 7) as usize;
     // The source window: 2 samples before and 3 after in each direction,
     // the reach of a six-tap filter.
-    const MAXW: usize = 16 + 5;
-    let mut win = [0u8; MAXW * MAXW];
     let (ww, wh) = (w + 5, h + 5);
-    let x0 = ix - 2;
-    let y0 = iy - 2;
+    let (x0, y0) = (ix - 2, iy - 2);
+    let d = dsp();
     let inside =
         x0 >= 0 && y0 >= 0 && (x0 as usize + ww) <= src.width && (y0 as usize + wh) <= src.height;
     if inside {
-        for r in 0..wh {
-            let s = (y0 as usize + r) * src.width + x0 as usize;
-            win[r * MAXW..r * MAXW + ww].copy_from_slice(&src.data[s..s + ww]);
+        let first = y0 as usize * src.width + x0 as usize;
+        // The kernels may read SUBPEL_READ bytes from each row's start.
+        if first + (wh - 1) * src.width + SUBPEL_READ <= src.data.len() {
+            // SAFETY: the window's rows, SUBPEL_READ bytes each, are inside
+            // `src.data` (checked above); `dst` holds `h` rows of `w` from
+            // `off` (asserted at the top).
+            unsafe {
+                (d.subpel)(
+                    src.data.as_ptr().add(first),
+                    src.width,
+                    dst.as_mut_ptr().add(off),
+                    stride,
+                    w,
+                    h,
+                    fx,
+                    fy,
+                    filters,
+                )
+            };
+            return;
         }
-    } else {
-        let maxx = src.width as i32 - 1;
-        let maxy = src.height as i32 - 1;
-        for r in 0..wh {
-            let sy = (y0 + r as i32).clamp(0, maxy) as usize * src.width;
-            for c in 0..ww {
-                let sx = (x0 + c as i32).clamp(0, maxx) as usize;
-                win[r * MAXW + c] = src.data[sy + sx];
+    }
+    // Near the plane's edges (or at its end): a copy of the window, reads
+    // outside the plane taking the nearest edge pixel — the buffer
+    // extension of RFC 6386 section 5, carried to any distance.
+    const WS: usize = SUBPEL_READ;
+    let mut win = [0u8; WS * (16 + 5)];
+    let maxx = src.width as i32 - 1;
+    let maxy = src.height as i32 - 1;
+    // Columns: those left of the plane repeat its first, those right of it
+    // its last, the rest are copied.
+    let left = (-x0).clamp(0, ww as i32) as usize;
+    let right = (x0 + ww as i32 - 1 - maxx).clamp(0, ww as i32) as usize;
+    let inner = ww.saturating_sub(left + right);
+    for r in 0..wh {
+        let row = &src.data[(y0 + r as i32).clamp(0, maxy) as usize * src.width..][..src.width];
+        let out = &mut win[r * WS..r * WS + ww];
+        if inner > 0 {
+            let first = (x0 + left as i32) as usize;
+            out[left..left + inner].copy_from_slice(&row[first..first + inner]);
+            out[..left].fill(row[0]);
+            out[left + inner..].fill(row[src.width - 1]);
+        } else {
+            for (c, v) in out.iter_mut().enumerate() {
+                *v = row[(x0 + c as i32).clamp(0, maxx) as usize];
             }
         }
     }
-    if fx == 0 && fy == 0 {
-        for r in 0..h {
-            dst[off + r * stride..off + r * stride + w]
-                .copy_from_slice(&win[(r + 2) * MAXW + 2..(r + 2) * MAXW + 2 + w]);
-        }
-        return;
-    }
-    // Horizontal pass over every window row, then the vertical pass
-    // (section 18.3); each rounds and saturates to 8 bits.
-    let hf = &filters[fx];
-    let mut mid = [0u8; MAXW * 16];
-    for r in 0..wh {
-        let row = &win[r * MAXW..];
-        for c in 0..w {
-            let t = &row[c..c + 6];
-            let s: i32 = (0..6).map(|i| t[i] as i32 * hf[i]).sum();
-            mid[r * 16 + c] = ((s + 64) >> 7).clamp(0, 255) as u8;
-        }
-    }
-    let vf = &filters[fy];
-    for r in 0..h {
-        for c in 0..w {
-            let s: i32 = (0..6).map(|i| mid[(r + i) * 16 + c] as i32 * vf[i]).sum();
-            dst[off + r * stride + c] = ((s + 64) >> 7).clamp(0, 255) as u8;
-        }
-    }
+    // SAFETY: `win` holds h + 5 rows of WS = SUBPEL_READ bytes; `dst` as
+    // above.
+    unsafe {
+        (d.subpel)(
+            win.as_ptr(),
+            WS,
+            dst.as_mut_ptr().add(off),
+            stride,
+            w,
+            h,
+            fx,
+            fy,
+            filters,
+        )
+    };
 }
 
 #[cfg(test)]

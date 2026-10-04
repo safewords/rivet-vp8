@@ -52,10 +52,19 @@ fn vector() -> &'static [Vec<u8>] {
     })
 }
 
+/// Decodes every frame on one thread and on three; whatever the frames
+/// hold, both must give the same pictures and the same errors.
 fn decode_all(frames: &[Vec<u8>]) {
-    let mut dec = Decoder::new();
+    let mut one = Decoder::new();
+    let mut three = Decoder::with_threads(3);
     for f in frames {
-        let _ = dec.decode(f);
+        let a = one.decode(f);
+        let b = three.decode(f);
+        match (a, b) {
+            (Ok(a), Ok(b)) => assert_eq!(a, b, "one thread and three disagree"),
+            (Err(a), Err(b)) => assert_eq!(a.to_string(), b.to_string()),
+            (a, b) => panic!("one thread: {a:?}, three: {b:?}"),
+        }
     }
 }
 

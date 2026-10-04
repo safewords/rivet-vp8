@@ -41,17 +41,21 @@
 
 mod boolcoder;
 mod decoder;
+mod dsp;
 mod encoder;
 mod error;
 mod frame;
 pub mod ivf;
 mod loopfilter;
+mod pool;
 mod predict;
+mod recon;
 mod tables;
 mod tables_rfc;
 mod transform;
 
 pub use decoder::Decoder;
+pub use dsp::simd_level;
 pub use encoder::{Config, Encoder};
 pub use error::{Error, Result};
 pub use frame::{Frame, Plane};

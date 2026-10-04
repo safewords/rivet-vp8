@@ -8,10 +8,9 @@
 //! reproduce). The forward transforms only have to approximate the
 //! inverses: they decide what is coded, not how it decodes.
 
-/// sqrt(2) * cos(pi / 8) - 1, and sqrt(2) * sin(pi / 8), in 16-bit fixed
-/// point (section 14.4).
-const COS_PI8_SQRT2_MINUS1: i32 = 20091;
-const SIN_PI8_SQRT2: i32 = 35468;
+use crate::dsp::dsp;
+#[cfg(test)]
+use crate::dsp::scalar::inverse_dct;
 
 /// The inverse Walsh-Hadamard transform of the Y2 block (section 14.3):
 /// `input` is the dequantised block in raster order, the result is the DC
@@ -49,58 +48,11 @@ pub(crate) fn inverse_wht(input: &[i16; 16]) -> [i16; 16] {
     out
 }
 
-#[inline]
-fn mul_sin(x: i32) -> i32 {
-    (x * SIN_PI8_SQRT2) >> 16
-}
-
-#[inline]
-fn mul_cos(x: i32) -> i32 {
-    x + ((x * COS_PI8_SQRT2_MINUS1) >> 16)
-}
-
-/// The inverse DCT of one 4x4 block (section 14.4): dequantised
-/// coefficients in raster order in, residue in raster order out.
-pub(crate) fn inverse_dct(input: &[i16; 16]) -> [i16; 16] {
-    let mut tmp = [0i16; 16];
-    // Vertical pass: one column at a time.
-    for i in 0..4 {
-        let (i0, i4, i8, i12) = (
-            input[i] as i32,
-            input[4 + i] as i32,
-            input[8 + i] as i32,
-            input[12 + i] as i32,
-        );
-        let a1 = i0 + i8;
-        let b1 = i0 - i8;
-        let c1 = mul_sin(i4) - mul_cos(i12);
-        let d1 = mul_cos(i4) + mul_sin(i12);
-        tmp[i] = (a1 + d1) as i16;
-        tmp[12 + i] = (a1 - d1) as i16;
-        tmp[4 + i] = (b1 + c1) as i16;
-        tmp[8 + i] = (b1 - c1) as i16;
-    }
-    let mut out = [0i16; 16];
-    // Horizontal pass with the final rounding.
-    for r in 0..4 {
-        let row = &tmp[r * 4..r * 4 + 4];
-        let (i0, i1, i2, i3) = (row[0] as i32, row[1] as i32, row[2] as i32, row[3] as i32);
-        let a1 = i0 + i2;
-        let b1 = i0 - i2;
-        let c1 = mul_sin(i1) - mul_cos(i3);
-        let d1 = mul_cos(i1) + mul_sin(i3);
-        out[r * 4] = ((a1 + d1 + 4) >> 3) as i16;
-        out[r * 4 + 3] = ((a1 - d1 + 4) >> 3) as i16;
-        out[r * 4 + 1] = ((b1 + c1 + 4) >> 3) as i16;
-        out[r * 4 + 2] = ((b1 - c1 + 4) >> 3) as i16;
-    }
-    out
-}
-
 /// Adds the inverse DCT of `coeffs` to the 4x4 block at `dst[off..]`
 /// (section 14.5: the sum is saturated to 8 bits).
 #[inline]
 pub(crate) fn add_residue(coeffs: &[i16; 16], dst: &mut [u8], off: usize, stride: usize) {
+    assert!(off + 3 * stride + 4 <= dst.len());
     // A block with only a DC coefficient inverts to a constant (the general
     // transform gives (dc + 4) >> 3 everywhere), the common case.
     if coeffs[1..].iter().all(|&c| c == 0) {
@@ -115,33 +67,16 @@ pub(crate) fn add_residue(coeffs: &[i16; 16], dst: &mut [u8], off: usize, stride
         }
         return;
     }
-    let res = inverse_dct(coeffs);
-    for r in 0..4 {
-        for c in 0..4 {
-            let p = &mut dst[off + r * stride + c];
-            *p = (*p as i32 + res[r * 4 + c] as i32).clamp(0, 255) as u8;
-        }
-    }
+    // SAFETY: four rows of four bytes from `off` (asserted above).
+    unsafe { (dsp().idct_add)(coeffs, dst.as_mut_ptr().add(off), stride) };
 }
 
-/// Forward DCT for the encoder: an integer approximation of the transform
-/// whose inverse is [`inverse_dct`] (it returns twice the orthonormal
-/// DCT-II coefficients, the scale section 14.4 says the inverse expects).
+/// Forward DCT for the encoder: twice the orthonormal DCT-II of the
+/// residue (the scale section 14.4 says the inverse expects), in fixed
+/// point (see `dsp::scalar::fdct`).
+#[inline]
 pub(crate) fn forward_dct(input: &[i16; 16]) -> [i16; 16] {
-    let mut out = [0i16; 16];
-    let basis = dct_basis();
-    for u in 0..4 {
-        for v in 0..4 {
-            let mut s = 0.0f64;
-            for y in 0..4 {
-                for x in 0..4 {
-                    s += input[y * 4 + x] as f64 * basis[u][y] * basis[v][x];
-                }
-            }
-            out[u * 4 + v] = (s * 2.0).round() as i16;
-        }
-    }
-    out
+    (dsp().fdct)(input)
 }
 
 /// Forward WHT for the encoder: the inverse of [`inverse_wht`] up to
@@ -167,6 +102,7 @@ pub(crate) fn forward_wht(input: &[i16; 16]) -> [i16; 16] {
 }
 
 /// Rows of the orthonormal 4-point DCT-II.
+#[cfg(test)]
 fn dct_basis() -> [[f64; 4]; 4] {
     let mut b = [[0.0; 4]; 4];
     for (k, row) in b.iter_mut().enumerate() {
