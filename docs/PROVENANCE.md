@@ -90,9 +90,33 @@ are checked to name every leaf exactly once.
 | Four and eight token partitions | 9.5 | as stated | not exercised by the vectors (they use one and two); covered by the encoder's round trips |
 | Version 3 luma | 9.1: version 3 has no reconstruction filter; 18.1 truncates chroma vectors to whole pixels | chroma whole-pixel (confirmed); luma uses the bilinear filter | luma not exercised |
 
+## Speed: SIMD kernels and threads
+
+The SIMD kernels (`src/dsp`) and the threading (`src/pool.rs`,
+`decoder::Schedule`, the encoder's wavefront) were designed here, on the
+same footing as the rest: the arithmetic each kernel must reproduce is the
+scalar code in `src/dsp/scalar.rs` (RFC 6386 sections 14.4, 15.2-15.3 and
+18.3), and each vector formulation was derived from it — the saturating
+signed-byte form of section 15's `c()` sums, the pairing of six-tap
+products so that no 16-bit sum overflows, the exact `x * 35468 >> 16` as
+`x + (x * (35468 - 65536) >> 16)`, the second inverse-DCT pass kept in 32
+bits because section 14.4 shifts its sums unwrapped. Every kernel is
+tested bit for bit against its scalar reference. No SIMD or multithreaded
+VP8 implementation (libvpx, FFmpeg or any other) was read; the instruction
+sets' own documentation is the only other source. The order in which
+threads may reconstruct and filter macroblocks follows from what each step
+reads and writes (sections 12 and 15), as `decoder::Schedule` sets out.
+
+The encoder's forward DCT is now fixed point (`dsp::scalar::fdct`: the
+orthonormal DCT-II basis in 13-bit fixed point, two rounded passes), in
+place of a floating-point transform; it is an encoder choice, not part of
+the format, and stays within one unit of twice the exact transform.
+
 ## Test data
 
 `tests/data` holds the eighteen comprehensive test vectors and their MD5
 lists, downloaded unchanged from the WebM project's public test-data bucket;
 [its README](../tests/data/README.md) gives the URLs, the date and a hash of
-each file.
+each file. `tools/fetch-vectors.sh` downloads the other 44 public VP8
+vectors (`vp80-01` to `vp80-06`, listed in `tools/vectors.txt`) from the
+same bucket into `tests/vectors/`, unchanged.

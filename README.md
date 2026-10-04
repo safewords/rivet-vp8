@@ -6,8 +6,9 @@ A **VP8** decoder and encoder in Rust: no C, no system libraries, no build
 script, nothing to install on a build host. Written from RFC 6386 — its
 prose and tables, not the reference decoder source the RFC attaches — and
 not translated from any other implementation. The decoder is **bit-exact**
-on all eighteen VP8 comprehensive test vectors, every frame (the figures are
-[below](#how-it-is-checked)).
+on all 62 public VP8 test vectors, every frame (the figures are
+[below](#how-it-is-checked)). SIMD kernels (SSE4.1, AVX2, NEON, chosen at
+run time) and threads make it [fast](#speed).
 
 Written for the **[rivet](https://github.com/safewords/rivet)**
 transcoder, where it is the VP8 codec on both sides: the decoder for VP8 in
@@ -79,6 +80,49 @@ and motion vector probability updates, bit-rate targeting. The encoder decodes e
 crate's decoder and predicts from that decoder's references, so encoder and
 decoder cannot drift.
 
+## Speed
+
+The pixel work runs in SIMD kernels — six-tap and bilinear interpolation,
+the inverse DCT and its add, the loop filters (16 segments of an edge at
+a time), and the encoder's SAD, SSE, forward DCT and quantiser — in SSE4.1
+and AVX2 on x86-64 and NEON on aarch64, picked once at run time from what
+the CPU has. Each reproduces its scalar reference bit for bit (tested on
+every CI host); `VP8_FORCE_SCALAR=1` in the environment keeps the scalar
+ones. `vp8::simd_level()` names the set in use.
+
+Both sides use threads, as many as asked for, with the same output for any
+count:
+
+- `Decoder::with_threads(n)` (or `set_threads`; 0 = one per CPU): rows of
+  macroblocks are reconstructed and loop filtered in a wavefront. Rows
+  reconstruct in parallel as far as the stream's token partitions allow
+  (row r reads partition r mod the count); with one partition the loop
+  filter still runs alongside reconstruction.
+- `Config::threads` for the encoder: macroblocks are decided in a
+  wavefront, rows in parallel, and the token partitions are written in
+  parallel. More `token_partitions` also make the stream faster to decode
+  on several threads.
+
+Measured on a Ryzen 9 9950X (16 cores, Windows 11), 30 frames of a camera
+clip scaled to each size, quantiser 40, frames per second (the fastest of
+three runs; "before" is this crate before the SIMD and thread work, decoding
+the same stream):
+
+| | before | 1 thread, scalar | 1 thread, SIMD | 16 threads |
+|---|---|---|---|---|
+| decode 1280x720 | 144 | 132 | 468 | 1226 (8 partitions), 617 (1) |
+| decode 1920x1080 | 62 | 48 | 213 | 537 (8 partitions), 259 (1) |
+| encode 1280x720 | 7.6 | 12.6 | 50 | 181 (8 partitions) |
+| encode 1920x1080 | 2.9 | 4.7 | 24 | 96 (8 partitions) |
+
+The encoder's gains are only partly SIMD: its forward DCT is now fixed
+point, whole-sample motion candidates are compared straight against the
+reference, mode and vector costs are tabulated per frame, and quantisation
+multiplies by exact reciprocals. `examples/vp8bench.rs` produces these
+figures (`tools/bench.sh SOURCE.y4m` runs the set), and `cargo test
+--release --lib kernel_timings -- --ignored --nocapture` times each kernel
+in each instruction set.
+
 ## How it is checked
 
 - **The comprehensive test vectors** (`tests/vectors.rs`):
@@ -92,6 +136,20 @@ decoder cannot drift.
   exercise are checked otherwise: sign bias (set in none of them) by unit
   tests of the vector census against RFC 6386 section 16.3, and four and
   eight token partitions by the encoder's round trips.
+- **The other 44 public test vectors** (`vp80-01` to `vp80-06`: intra,
+  inter, segmentation, partitions, sharpness, small sizes), downloaded by
+  `tools/fetch-vectors.sh` into `tests/vectors` and checked by the same
+  test when present. **44 of 44 streams, 1060 of 1060 frames bit-exact.**
+  CI downloads them and runs all 62 with the SIMD kernels and with
+  `VP8_FORCE_SCALAR=1`, on x86-64 and arm64.
+- **Threads**: every vector is decoded on one thread and on three; the
+  encoder's round trips compare one and four encoder threads (the streams
+  must be identical) and one and three decoder threads.
+- **SIMD kernels** (`src/dsp/tests.rs`): every SSE4.1, AVX2 and NEON kernel
+  against its scalar reference on random and extreme input (saturating
+  filter sums, overflowing coefficients, every filter index, every
+  quantiser step); `VP8_REQUIRE_SIMD=1` turns a missing AVX2 or NEON rung
+  into a failure rather than a skip.
 - **Encoder round trips** (`tests/roundtrip.rs`): the decoder must
   reproduce the encoder's own reconstruction byte for byte, frame after
   frame (key and inter, odd sizes from 1x1 up, 1 to 8 token partitions,
@@ -120,11 +178,11 @@ decoder cannot drift.
   valid streams (this encoder's, and a test vector using split vectors and
   golden / altref) with bits flipped, bytes cut, replaced and spliced, decode
   to errors or pictures and never panic — in a debug build too, where
-  arithmetic overflow would.
+  arithmetic overflow would — and to the same pictures and errors on one
+  thread and on three.
 
-All of it runs with `cargo test`; nothing external is needed. All 872
-frames of the test vectors decode and hash in about 0.4 s (release build,
-one core). The code is scalar and single-threaded; there is no SIMD yet.
+All of it runs with `cargo test` (the 44 downloaded vectors are skipped
+until fetched); nothing else external is needed.
 
 ## Provenance and licensing
 
@@ -149,7 +207,7 @@ anyone needs one.
 // Decoding an IVF file.
 let data = std::fs::read("in.ivf")?;
 let mut ivf = vp8::ivf::IvfReader::new(&data[..])?;
-let mut dec = vp8::Decoder::new();
+let mut dec = vp8::Decoder::with_threads(0); // 0: a thread per CPU
 while let Some(frame) = ivf.next_frame()? {
     if let Some(picture) = dec.decode(&frame.data)? {
         // picture.plane(0), plane(1), plane(2): Y, U, V; picture.packed(): I420
@@ -158,7 +216,8 @@ while let Some(frame) = ivf.next_frame()? {
 
 // Encoding.
 let mut enc = vp8::Encoder::new(vp8::Config {
-    width: 320, height: 240, quantizer: 40, ..Default::default()
+    width: 320, height: 240, quantizer: 40, threads: 4, token_partitions: 4,
+    ..Default::default()
 })?;
 let mut out = vp8::ivf::IvfWriter::new(std::fs::File::create("out.ivf")?, 320, 240, 30, 1, 0)?;
 for (t, picture) in pictures.iter().enumerate() {

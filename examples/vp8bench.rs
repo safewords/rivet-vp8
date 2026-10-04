@@ -85,11 +85,12 @@ fn main() {
     let (packets, w, h) = if let Some(path) = ivf_in {
         let data = std::fs::read(&path).expect("read IVF");
         let mut r = IvfReader::new(&data[..]).expect("IVF header");
+        let (w, h) = (r.header().width as u32, r.header().height as u32);
         let mut packets = Vec::new();
         while let Some(f) = r.next_frame().expect("IVF frame") {
             packets.push(f.data);
         }
-        (packets, 0, 0)
+        (packets, w, h)
     } else {
         let path = src_path.expect("a .y4m source");
         let mut pics = read_y4m(&path, size);
@@ -160,7 +161,8 @@ fn main() {
         digest = d;
     }
     println!(
-        "decode {w}x{h} threads {threads}: {} frames, {:.4} s, {:.1} fps (checksum {digest:x})",
+        "decode {w}x{h} threads {threads} ({}): {} frames, {:.4} s, {:.1} fps (checksum {digest:x})",
+        vp8::simd_level(),
         packets.len(),
         best,
         packets.len() as f64 / best
