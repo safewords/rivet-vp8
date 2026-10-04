@@ -117,8 +117,8 @@ jobs:
         # sccache on the cluster's Garage (safewords/helm-charts ci-cache):
         # read-only for pull requests, written by pushes to develop / main.
         run: if command -v ci-cache-setup >/dev/null; then ci-cache-setup; else echo "no compile cache on this runner"; fi
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
