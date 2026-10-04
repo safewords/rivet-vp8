@@ -16,6 +16,12 @@ env:
 # portable, and the NEON (aarch64) paths are checked by hand on ARM hardware
 # (README, "NEON on ARM hardware").
 
+# id-token: a push to develop or main shows the compile cache's broker its
+# OIDC token to be allowed to write the cache (ci-cache-setup).
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   test:
     name: tests (${{ matrix.name }})
@@ -34,7 +40,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Compile cache
+        # sccache on the cluster's Garage (safewords/helm-charts ci-cache):
+        # read-only for pull requests, written by pushes to develop / main.
+        run: if command -v ci-cache-setup >/dev/null; then ci-cache-setup; else echo "no compile cache on this runner"; fi
       # The test vectors' MD5s, every frame of all eighteen committed
       # streams (on 1 and 3 threads); the encoder round trips (1 and 4
       # threads); the kernels against their scalar references.
@@ -64,7 +73,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - name: Compile cache
+        # sccache on the cluster's Garage (safewords/helm-charts ci-cache):
+        # read-only for pull requests, written by pushes to develop / main.
+        run: if command -v ci-cache-setup >/dev/null; then ci-cache-setup; else echo "no compile cache on this runner"; fi
       - uses: actions/cache@v4
         with:
           path: tests/vectors
@@ -87,7 +99,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.99
-      - uses: Swatinem/rust-cache@v2
+      - name: Compile cache
+        # sccache on the cluster's Garage (safewords/helm-charts ci-cache):
+        # read-only for pull requests, written by pushes to develop / main.
+        run: if command -v ci-cache-setup >/dev/null; then ci-cache-setup; else echo "no compile cache on this runner"; fi
       - run: cargo build --release
 
   lint:
@@ -98,9 +113,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
+      - name: Compile cache
+        # sccache on the cluster's Garage (safewords/helm-charts ci-cache):
+        # read-only for pull requests, written by pushes to develop / main.
+        run: if command -v ci-cache-setup >/dev/null; then ci-cache-setup; else echo "no compile cache on this runner"; fi
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo doc --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+  # rivet's compile cache, warmed with this commit before rivet's submodule is
+  # bumped to it: the commit built inside rivet exactly as rivet's CI builds
+  # it (safewords/rivet-transcoder .github/workflows/codec-cache-warmup.yml).
+  # Never fails this workflow.
+  rivet-cache:
+    name: warm rivet's compile cache
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    permissions:
+      contents: read
+      id-token: write
+    uses: safewords/rivet-transcoder/.github/workflows/codec-cache-warmup.yml@develop
+    with:
+      crates: rivet-vp8
+      submodule: crates/vp8
