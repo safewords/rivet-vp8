@@ -86,8 +86,8 @@ The pixel work runs in SIMD kernels — six-tap and bilinear interpolation,
 the inverse DCT and its add, the loop filters (16 segments of an edge at
 a time), and the encoder's SAD, SSE, forward DCT and quantiser — in SSE4.1
 and AVX2 on x86-64 and NEON on aarch64, picked once at run time from what
-the CPU has. Each reproduces its scalar reference bit for bit (tested on
-every CI host); `VP8_FORCE_SCALAR=1` in the environment keeps the scalar
+the CPU has. Each reproduces its scalar reference bit for bit (tested in
+CI on x86-64, by hand on aarch64); `VP8_FORCE_SCALAR=1` in the environment keeps the scalar
 ones. `vp8::simd_level()` names the set in use.
 
 Both sides use threads, as many as asked for, with the same output for any
@@ -141,7 +141,7 @@ in each instruction set.
   `tools/fetch-vectors.sh` into `tests/vectors` and checked by the same
   test when present. **44 of 44 streams, 1060 of 1060 frames bit-exact.**
   CI downloads them and runs all 62 with the SIMD kernels and with
-  `VP8_FORCE_SCALAR=1`, on x86-64 and arm64.
+  `VP8_FORCE_SCALAR=1`, on x86-64.
 - **Threads**: every vector is decoded on one thread and on three; the
   encoder's round trips compare one and four encoder threads (the streams
   must be identical) and one and three decoder threads.
@@ -183,6 +183,21 @@ in each instruction set.
 
 All of it runs with `cargo test` (the 44 downloaded vectors are skipped
 until fetched); nothing else external is needed.
+
+### NEON on ARM hardware
+
+CI runs on x86-64 Linux only, so the NEON (aarch64) code paths are not tested
+there. They are verified by hand on ARM hardware (an aarch64 Linux machine,
+or Apple silicon) after a change to them and before a release:
+
+```sh
+VP8_REQUIRE_SIMD=1 cargo test --release
+VP8_FORCE_SCALAR=1 cargo test --release
+```
+
+The first run checks the NEON kernels bit for bit against the scalar ones;
+the second runs everything on the scalar kernels. The test vectors can be
+run the same way, as the `vectors` job in `.github/workflows/ci.yml` does.
 
 ## Provenance and licensing
 
